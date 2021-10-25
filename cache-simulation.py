@@ -8,7 +8,7 @@ def usage(name):
     sys.stderr.write("Usage: %s [-h] [-v] [-d <int>] [-k <int>] [-i {0|1}*] \n" % name)
     sys.stderr.write("  -h                Print this message\n")
     sys.stderr.write("  -v                Verbose output for each clock cycle\n")
-    sys.stderr.write("  -d                Cache set size (spawn same number of spies)\n")
+    sys.stderr.write("  -s                Cache set size (spawn same number of spies)\n")
     sys.stderr.write("  -k                RSA key exponents, e.g. 011000110\n")
     sys.stderr.write("  -i                Iterations of RSA key detection\n")
 
@@ -39,14 +39,43 @@ class thread():
       offset = (waitTime + self.id) - (self.total-self.id-1)
     self.ready +=  offset # spy update ? (reverse order) (account for misses)...
 
+class Cache:
+  def __init__(self, associativity, tcount):
+    self.ass = associativity
+    self.L3 = [-1]* associativity # set associaty of L3 (only care about a single set)
+    self.L3Full = False
+    self.missCnt = [0]*tcount
+
+  # If loc in L3 -> hit (True)
+  # If loc not in L3 and L3 full -> miss (False) and use replacement policy
+  def load(self, loc):
+    if loc in self.L3: # Hit
+      return True
+    elif not self.L3Full: # Miss -> Not Full
+      cnt = 0
+      while self.L3[cnt] > -1: cnt += 1
+      self.L3[cnt] = loc
+      if (cnt+1) == len(self.L3): self.L3Full = True
+      return False
+    else: # Miss -> Replacement Policy
+      newLoc = self.evict()
+      self.L3[newLoc] = loc
+      self.missCnt[loc] += 1 # Counter triggered by SHARP on random evict
+      return False
+
+  # Current setup assumes each thread only accesses one location in the set
+  # so no need to check for other used locations within the set or inclusivity
+  def evict(self):
+    # Select at random
+    return random.randint(0,len(self.L3)-1)
+    
+  def reset(self):
+    self.L3 = [-1] * len(self.L3)
+    self.L3Full = False
+    
 class Simulator():
-  
-  L3       = None
-  L3Full   = None
-  missCnt  = None
   spies    = None
   victim   = None
-  tcount   = None
   spyKeys  = None
   fullKey  = None
   origKey  = None
@@ -58,13 +87,11 @@ class Simulator():
     self.spies = []
     for i in range(tcount-1): self.spies.append(thread(False,i,tcount-1))
     self.victim = thread(True,tcount-1,1)
-    self.L3 = [-1] * setAssoc # set associaty of L3 (only care about a single set)
-    self.L3Full = False
-    self.missCnt = [0] * tcount
     self.spyKeys = []
     self.origKey = origKey
     self.verbose = verbose
     self.victimT = tcount+1
+    self.cache = Cache(setAssoc, tcount)
     
   # Each spy has a list of hits and misses
   # Reconstruct partial key from those
@@ -103,29 +130,6 @@ class Simulator():
     
     self.fullKey = fullKey
    
-  # Current setup assumes each thread only accesses one location in the set
-  # so no need to check for other used locations within the set or inclusivity
-  def evict(self):
-    # Select at random
-    return random.randint(0,len(self.L3)-1)
-   
-  # If loc in L3 -> hit (True)
-  # If loc not in L3 and L3 full -> miss (False) and use replacement policy
-  def load(self, loc):
-    if loc in self.L3: # Hit
-      return True
-    elif not self.L3Full: # Miss -> Not Full
-      cnt = 0
-      while self.L3[cnt] > -1: cnt += 1
-      self.L3[cnt] = loc
-      if (cnt+1) == len(self.L3): self.L3Full = True
-      return False
-    else: # Miss -> Replacement Policy
-      newLoc = self.evict()
-      self.L3[newLoc] = loc
-      self.missCnt[loc] += 1 # Counter triggered by SHARP on random evict
-      return False
-    
   def resetThreads(self):
     self.victim.cnt = 0
     self.victim.ready = 0
@@ -141,13 +145,13 @@ class Simulator():
         if self.verbose: print("Clock "+str(c))
         for t in self.spies: # Spies first to fill up the cache
           if t.ready == c:
-            hit = self.load(t.id) # Spy loads its own data
+            hit = self.cache.load(t.id) # Spy loads its own data
             if self.verbose: print("SPY "+str(t.id)+" Hit: "+str(hit))
             t.update_spy(self.victimT,hit)
         if self.victim.ready == c:
           if self.victim.cnt == len(self.origKey): break
           if (self.origKey[self.victim.cnt] == 1): # Victim loads exponent code
-            hit = self.load(self.victim.id)
+            hit = self.cache.load(self.victim.id)
             self.victim.update_victim(True, self.victimT, hit)
             if self.verbose: print("Victim exp "+" Hit: "+str(hit))
           else:
@@ -157,8 +161,7 @@ class Simulator():
       self.combineSpies() # Combine the information from the spies
       print("Key at iteration "+str(i) + " " + str(self.spyKeys[-1]))
       self.resetThreads()
-      self.L3Full = False
-      self.L3 = [-1] * len(self.L3)
+      self.cache.reset()
     self.combineKeys() # Combine partial keys found in each iteration
     print("Spied Key " + str(self.fullKey))
     print("Origi Key " + str(self.origKey))
