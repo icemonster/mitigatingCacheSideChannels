@@ -30,9 +30,9 @@ class thread():
     if self.cnt == 1:
       offset = waitTime - self.id
     elif self.cnt % 2 == 1:
-      offset = 2*waitTime - 2*(self.id+1)
+      offset = (waitTime + (self.total-self.id-1)) - (self.id)
     else:
-      offset = 2*waitTime - 2*(self.total-self.id)
+      offset = (waitTime + self.id) - (self.total-self.id-1)
     self.ready +=  offset # spy update ? (reverse order) (account for misses)...
 
 class Simulator():
@@ -46,9 +46,10 @@ class Simulator():
   spyKeys  = None
   fullKey  = None
   origKey  = None
-  victimT  = 5
+  victimT  = None
+  verbose  = None
   
-  def __init__(self, tcount, setAssoc, origKey):
+  def __init__(self, tcount, setAssoc, origKey, verbose):
     self.tcount = tcount
     self.spies = []
     for i in range(tcount-1): self.spies.append(thread(False,i,tcount-1))
@@ -58,6 +59,8 @@ class Simulator():
     self.missCnt = [0] * tcount
     self.spyKeys = []
     self.origKey = origKey
+    self.verbose = verbose
+    self.victimT = tcount+1
     
   # Each spy has a list of hits and misses
   # Reconstruct partial key from those
@@ -67,9 +70,13 @@ class Simulator():
     for i in range(1,len(self.origKey)+1):
       hits = [t.spyHits[i] for t in self.spies]
       out = -1
+      cnt = 0
+      for h in hits:
+        if not h: cnt += 1
       if all(hits): out = 0
-      elif prevAll and i%2 == 0 and hits[0] == True: out = 1
-      elif prevAll and i%2 == 1 and hits[-1] == True: out = 1
+      elif prevAll and cnt > 0: out = 1
+      elif i%2 == 0 and hits[0] == False: out = 1 # Last loaded spy now misses in next iteration (must have been displaced by victim (only access in between)
+      elif i%2 == 1 and hits[-1] == False: out = 1
       prevAll = all(hits)
       combinedKey.append(out)
     
@@ -127,21 +134,21 @@ class Simulator():
     for i in range(rsaIter): # Each iteration victim uses full RSA key
       c = 0 # clock counter
       while True: # run until full RSA key used
-        print("Clock "+str(c))
+        if self.verbose: print("Clock "+str(c))
         for t in self.spies: # Spies first to fill up the cache
           if t.ready == c:
             hit = self.load(t.id) # Spy loads its own data
-            print("SPY "+str(t.id)+" Hit: "+str(hit))
+            if self.verbose: print("SPY "+str(t.id)+" Hit: "+str(hit))
             t.update_spy(self.victimT,hit)
         if self.victim.ready == c:
           if self.victim.cnt == len(self.origKey): break
           if (self.origKey[self.victim.cnt] == 1): # Victim loads exponent code
             hit = self.load(self.victim.id)
             self.victim.update_victim(True, self.victimT, hit)
-            print("Victim exp "+" Hit: "+str(hit))
+            if self.verbose: print("Victim exp "+" Hit: "+str(hit))
           else:
             self.victim.update_victim(False, self.victimT)
-            print("Victim Noexp")
+            if self.verbose: print("Victim Noexp")
         c += 1 # next clock
       self.combineSpies() # Combine the information from the spies
       print("Key at iteration "+str(i) + " " + str(self.spyKeys[-1]))
@@ -151,18 +158,37 @@ class Simulator():
     self.combineKeys() # Combine partial keys found in each iteration
     print("Spied Key " + str(self.fullKey))
     print("Origi Key " + str(self.origKey))
-    
+    cnt = 0
+    for i in range(len(self.fullKey)):
+      if self.fullKey[i] == -1: cnt += 1
+      elif self.fullKey[i] != self.origKey[i]: print("e mismatched key")
+    print("Number missed: "+str(cnt))
 
 
 def run(name, args):
     
-    optlist, args = getopt.getopt(args, "h")
+    rsa = [0,1,0,1,0,1]
+    iters = 5
+    Csize = 4
+    verbose = False
+    
+    optlist, args = getopt.getopt(args, "vhs:i:k:")
     for (opt, val) in optlist:
         if opt == '-h':
           usage(name)
           return
-    sim = Simulator(5,4,[0,1,0,1,0,1])
-    sim.runSimulation(5)
+        elif opt == '-s':
+          Csize = int(val)
+        elif opt == '-k':
+          rsa = [int(e) for e in val]
+        elif opt == '-i':
+          iters = int(val)
+        elif opt == '-v':
+          verbose = True
+    
+    random.seed(0)
+    sim = Simulator(Csize+1, Csize, rsa, verbose)
+    sim.runSimulation(iters)
     
 if __name__ == "__main__":
     run(sys.argv[0], sys.argv[1:])
