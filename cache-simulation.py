@@ -34,11 +34,6 @@ class thread():
     else:
       offset = 2*waitTime - 2*(self.total-self.id)
     self.ready +=  offset # spy update ? (reverse order) (account for misses)...
-    
-#0: 0, 5, 7, 15, 17
-#1: 0, 4, 8, 14, 18
-#2: 0, 3, 9, 13, 19
-#3: 0, 2, 10, 12, 20
 
 class Simulator():
   
