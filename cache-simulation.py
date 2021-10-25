@@ -5,8 +5,12 @@ import operator
 import random
 
 def usage(name):
-    sys.stderr.write("Usage: %s [-h] " % name)
+    sys.stderr.write("Usage: %s [-h] [-v] [-d <int>] [-k <int>] [-i {0|1}*] \n" % name)
     sys.stderr.write("  -h                Print this message\n")
+    sys.stderr.write("  -v                Verbose output for each clock cycle\n")
+    sys.stderr.write("  -d                Cache set size (spawn same number of spies)\n")
+    sys.stderr.write("  -k                RSA key exponents, e.g. 011000110\n")
+    sys.stderr.write("  -i                Iterations of RSA key detection\n")
 
 
 class thread():
