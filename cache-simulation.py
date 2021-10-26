@@ -15,7 +15,7 @@ def usage(name):
 
 class thread():
   
-  def __init__(self, victim, id, total, cache):
+  def __init__(self, victim, id, total, cache, core_id):
     self.victim   = victim
     self.id       = id
     self.total    = total
@@ -23,6 +23,7 @@ class thread():
     self.cnt      = 0
     self.spyHits  = []
     self.cache = cache
+    self.core_id = core_id #Core in which this thread is running
     
   def update_victim(self, useExp, waitTime, hit=False):
     self.ready += waitTime # time between reads, impacted by cache hit/miss?
@@ -41,39 +42,77 @@ class thread():
     self.ready +=  offset # spy update ? (reverse order) (account for misses)...
 
   def load(self, loc):
-    return self.cache.load(loc)
+    hit, evicted = self.cache.load(loc, self.core_id)
+    return hit
 
 class Cache:
   def __init__(self, associativity, tcount, upper_level):
     self.ass = associativity
-    self.data = [-1]* associativity # set associativity of Cache (only care about a single set)
+    self.data = [-1] * associativity # set associativity of Cache (only care about a single set)
+    self.owners = [-1] * associativity
     self.full = False
-    self.missCnt = [0]*tcount
+    self.alarm_count = [0]*tcount
     self.upper_level_cache = upper_level
+    self.evict = self.evict_default
+
+  def evict_selected(self, loc):
+    '''
+      Evict location <loc> and update the bit set of L3
+    '''
+    for idx in range(len(self.data)):
+      if self.data[idx] == loc:
+        self.data[idx] = -1
+        self.owners[idx] = -1
+        if self.upper_level_cache is not None:
+          self.upper_level_cache.evict_selected(loc)
+        self.full = False
 
   # If loc in Cache -> hit (True)
   # If loc not in Cache and Cache full -> miss (False) and use replacement policy
-  def load(self, loc):
+  def load(self, loc, core_id):
     hit_LLC = True
+    evicted = None
+
     if loc not in self.data: # Miss
       if self.upper_level_cache is not None:
-        hit_LLC = self.upper_level_cache.load(loc)
+        hit_LLC, evicted = self.upper_level_cache.load(loc, core_id)
+        if evicted is not None:
+          for idx in range(len(self.data)):
+            if self.data[idx] == evicted:
+              self.data[idx] = -1
+              self.owners[idx] = -1
       else:
         hit_LLC = False
       if not self.full: # Miss -> Not Full
         idx = self.data.index(-1)
         self.data[idx] = loc
-        self.full = (idx+1) == len(self.data)
+        self.owners[idx] = core_id
+        self.full = all(map(lambda x: x != -1, self.data))
       else: # Miss -> Replacement Policy
-        newLoc = self.evict(loc)
-        self.data[newLoc] = loc
-    return hit_LLC
+        newLoc = self.evict(loc, core_id)
 
-  # Current setup assumes each thread only accesses one location in the set
-  # so no need to check for other used locations within the set or inclusivity
-  def evict(self, loc):
+        #Enforce inclusivity
+        evicted = self.data[newLoc]
+
+        self.data[newLoc] = loc
+        self.owners[newLoc] = core_id
+    return hit_LLC, evicted
+
+  def evict_default(self, loc, core_id):
+    '''
+    For setups where we assume each thread only accesses one location in the set
+    # so no need to check for other used locations within the set
+    '''
+    to_evict = random.randint(0,len(self.data)-1)
+    return to_evict
+    
+  def evict_sharp(self, loc, core_id):
     # Select at random
-    self.missCnt[loc] += 1 # Counter triggered by SHARP on random evict
+    for idx in range(len(self.data)):
+      if self.owners[idx] == core_id:
+        return idx
+    
+    self.alarm_count[core_id] += 1 # Counter triggered by SHARP on random evict
     return random.randint(0,len(self.data)-1)
     
   def reset(self):
@@ -86,8 +125,10 @@ class Attack1():
     self.tcount = tcount
     self.spies = []
     self.cache = Cache(setAssoc, tcount, None)
-    for i in range(tcount-1): self.spies.append(thread(False,i,tcount-1, self.cache))
-    self.victim = thread(True,tcount-1,1, self.cache)
+    self.cache.evict = self.cache.evict_sharp
+
+    for i in range(tcount-1): self.spies.append(thread(False,i,tcount-1, self.cache, i))
+    self.victim = thread(True,tcount-1,1, self.cache, tcount-1)
     self.spyKeys = []
     self.origKey = origKey
     self.verbose = verbose
@@ -176,18 +217,108 @@ class Attack1():
 
 class Attack2:
   def __init__(self, tcount, setAssoc, origKey, verbose):
-    L3Cache = Cache(setAssoc, tcount, None)
-    L2Cache_1 = Cache(4, tcount, L3Cache)
-    L2Cache_2 = Cache(4, tcount, L3Cache)
+    self.L3Cache = Cache(setAssoc, tcount, None)
+    self.L3Cache.evict = self.L3Cache.evict_sharp
+    self.L2Cache_1 = Cache(4, tcount, self.L3Cache)
+    self.L2Cache_2 = Cache(4, tcount, self.L3Cache)
     self.origKey = origKey
     self.verbose = verbose
     self.tcount = tcount
-    self.victim = thread(True, 0, tcount-1, L2Cache_1)
-    self.spy1 = thread(False, 1, tcount-1, L2Cache_1)
-    self.spy2 = thread(False, 2, tcount-1, L2Cache_2)
+    self.ass = setAssoc
+    self.victim = thread(True, 0, tcount-1, self.L2Cache_1, 0)
+    self.spy1 = thread(False, 1, tcount-1, self.L2Cache_1, 0)
+    self.spy2 = thread(False, 2, tcount-1, self.L2Cache_2, 1)
+    self.spy2_leaked = [] #Leaked key
+
+    self.spy2.ready = 0 #First to go, take ownership of all lines
+    self.victim.ready = 1 #Then, victim takes control of 1 line
+    self.spy1.ready = 2 #Then, spi1 evicts that block
+    self.victimT = 3
+
+  def process_leak(self):
+    ''' Use spy2 measurements to compute the key '''
+    return self.spy2_leaked
+
+  def resetThreads(self):
+    self.victim.cnt = 0
+    self.victim.ready = 0
+    for s in (self.spy1, self.spy2):
+      s.cnt = 0
+      s.spyHits = []
+      s.ready = 0
 
   def runSimulation(self, iters):
-    raise NotImplementedError("TODO")
+    iters = 1 #Always need a single iteration only
+    victim_addr = 0x4001337 #Just a random address
+    for i in range(iters):
+      self.spy2_leaked = []
+      c = -1
+      while 1:
+        c = c + 1
+        if self.verbose: 
+          print("Clock "+str(c))
+          print(self.L3Cache.data)
+          print(self.L3Cache.owners)
+
+        if self.spy1.ready == c:
+          #Evict the same block as the victim
+          self.L2Cache_1.evict_selected(victim_addr)
+          self.spy1.ready += 3
+        if self.spy2.ready == c:
+          misses = 0
+          miss = []
+
+          #Reset so we always miss our L2 cache. 
+            #This can be done IRL by accessing another group of lines that map to the same set in the L3
+          self.L2Cache_2.reset() 
+
+          #Take ownership of all lines in the set
+          for line in range(self.ass):
+            hit = self.spy2.load(line)
+            if not hit:
+              misses += 1
+              miss.append(line)
+          if misses == 1:
+            if self.verbose: print("Spy2: I think exp is 1", miss, len(self.spy2_leaked))
+            self.spy2_leaked.append(1)
+          elif misses == 0:
+            if self.verbose: print("Spy2: I think exp is 0", miss, len(self.spy2_leaked))
+            self.spy2_leaked.append(0)
+          else:
+            if self.verbose: print("Spy2: #Misses:", misses, miss, len(self.spy2_leaked))
+          self.spy2.ready += 3
+
+        if self.victim.ready == c:
+          # Same behaviour as the previous attack
+          if self.victim.cnt == len(self.origKey): break
+          if (self.origKey[self.victim.cnt] == 1): # Victim loads exponent code
+            hit = self.victim.load(victim_addr)
+            #self.victim.update_victim(True, self.victimT, hit)
+            if self.verbose: print("Victim exp "+" Hit: "+str(hit))
+          else:
+            #self.victim.update_victim(False, self.victimT)
+            if self.verbose: print("Victim Noexp")
+          self.victim.ready += 3
+          self.victim.cnt +=  1
+
+      self.L2Cache_1.reset()
+      self.L2Cache_2.reset()
+      self.L3Cache.reset()
+      self.resetThreads()
+
+    leaked_key = self.process_leak() # Combine partial keys found in each iteration
+    cnt = 0
+    for i in range(len(leaked_key)):
+      if i >= len(self.origKey):
+        if self.verbose: print("Too many leaked bits")
+        break
+      if leaked_key[i] == -1: cnt += 1
+      else: assert leaked_key[i] == self.origKey[i], f"e mismatched key at bit: {i}"
+
+    print("Spied Key " + str(leaked_key))
+    print("Origi Key " + str(self.origKey))
+    print("Number missed: "+str(cnt))
+
 
 def run(name, args):
     
