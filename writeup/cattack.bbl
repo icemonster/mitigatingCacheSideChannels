@@ -1,0 +1,33 @@
+\begin{thebibliography}{1}
+
+\bibitem{partKey}
+Matthew Campagna and Amit Sethi.
+\newblock Key recovery method for crt implementation of rsa.
+\newblock {\em IACR Cryptology ePrint Archive}, 2004:147, 01 2004.
+
+\bibitem{exp}
+Daniel~M. Gordon.
+\newblock A survey of fast exponentiation methods.
+\newblock {\em Journal of Algorithms}, 27(1):129--146, 1998.
+
+\bibitem{howSharp}
+Dixit Kumar, Chavhan~Sujeet Yashavant, Biswabandan Panda, and Vishal Gupta.
+\newblock How sharp is {SHARP} ?
+\newblock In {\em 13th {USENIX} Workshop on Offensive Technologies ({WOOT}
+  19)}, Santa Clara, CA, August 2019. {USENIX} Association.
+
+\bibitem{sharp}
+Mengjia Yan, Bhargava Gopireddy, Thomas Shull, and Josep Torrellas.
+\newblock Secure hierarchy-aware cache replacement policy (sharp): Defending
+  against cache-based side channel attacks.
+\newblock In {\em 2017 ACM/IEEE 44th Annual International Symposium on Computer
+  Architecture (ISCA)}, pages 347--360, 2017.
+
+\bibitem{waitTime}
+Yuval Yarom and Katrina Falkner.
+\newblock Flush+reload: A high resolution, low noise, l3 cache side-channel
+  attack.
+\newblock In {\em 23rd {USENIX} Security Symposium ({USENIX} Security 14)},
+  pages 719--732, San Diego, CA, August 2014. {USENIX} Association.
+
+\end{thebibliography}
