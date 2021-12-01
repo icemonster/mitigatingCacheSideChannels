@@ -7,17 +7,7 @@
 #include <stdlib.h>
 #include "pin.H"
 
-#define MILLION 1000000
-#define THOUSAND 1000
-#define NUM_ORDERED_ACCESS_MISSES 20
-
 using namespace std;
-
-typedef struct Reference {
-    unsigned long count;
-    unsigned long misses;
-    unsigned long PC;
-} Ref;
 
 typedef struct Way_Struct {
     bool valid;
@@ -56,7 +46,6 @@ class Cache {
         unsigned int line_size;
         unsigned int miss_penalty;
         unsigned int associativity;
-        vector<Access*> ordered_accesses;
 
         unsigned long tag_mask;
         unsigned long set_mask;
@@ -64,8 +53,6 @@ class Cache {
 
         unsigned long set_bits;
         unsigned long blk_bits;
-
-        map<pair<unsigned long, bool>, Reference*> all_accesses; 
 
         Way **sets;
     
@@ -77,7 +64,7 @@ class Cache {
         
 
         
-        Cache(unsigned int s, unsigned int ls, unsigned int mp, unsigned int a, bool sp) : ordered_accesses(NUM_ORDERED_ACCESS_MISSES) {
+        Cache(unsigned int s, unsigned int ls, unsigned int mp, unsigned int a, bool sp) {
             size = s;
             line_size = ls;
             miss_penalty = mp;
@@ -123,35 +110,6 @@ class Cache {
 
         unsigned long get_set_index(unsigned long addr){
             return (addr & set_mask) >> blk_bits;
-        }
-
-        void compute_ordered_misses(int number){
-            unsigned long acc = 0;
-
-            vector<Access*> all_accesses_vec;
-
-            for (auto const& it : all_accesses){
-                acc++;
-                all_accesses_vec.push_back(new Access(it.first.first, it.first.second, it.second->count, it.second->misses));
-            }
-
-            partial_sort_copy(
-                all_accesses_vec.begin(), all_accesses_vec.end(), //.begin/.end in C++98/C++03
-                ordered_accesses.begin(), ordered_accesses.end(), 
-                better_access //remove "int" in C++14
-            );
-        }
-
-        int increment_access(pair<unsigned long, bool> key, bool type, bool is_miss){
-            if (all_accesses.count(key) == 0)
-                return 0;
-            
-            all_accesses[key]->count++;
-            if (is_miss){
-                all_accesses[key]->misses++;
-            }
-
-            return 1;
         }
 
         bool find_tag_in_set(unsigned long set, unsigned long addr){
@@ -249,16 +207,6 @@ class Cache {
                 
                 if (sharp) evict_sharp_block (set, addr, core);
                 else evict_lru_block(set, addr);
-            }
-
-
-            /* Update the global access_count/miss_count for this specific address */
-            int already_accessed = increment_access(key, is_load, is_miss);
-            if (!already_accessed){
-                Ref *access = (Ref *)malloc(sizeof(Ref)); /* TODO - Free this in Fini */
-                access->count = 1;
-                access->misses = 1;
-                all_accesses[key] = access;
             }
 
             return is_miss;
@@ -414,7 +362,7 @@ VOID Instruction(INS ins, VOID *v)
 }
 
 // J
-void print_combinded_key () {
+void print_combined_key () {
     if (multi_spy) {
         // combine hits from spies
         vector<int> combined_key;
@@ -443,88 +391,7 @@ void print_combinded_key () {
 
 VOID Fini(INT32 code, VOID *v)
 {
-    cout.precision(4);
-
-    // Print the actual results
-    unsigned long instr_exec = instr_cache->accesses;
-    unsigned long data_stalls = data_cache->misses*data_cache->miss_penalty;;
-    unsigned long instr_stalls = instr_cache->misses*instr_cache->miss_penalty;
-    unsigned long total = instr_exec + data_stalls + instr_stalls;
-    long double instr_exec_rate = (long double)(instr_exec * 100) / (long double)total;
-    long double data_stall_rate = (long double)(data_stalls * 100) / (long double)total;
-    long double instr_stall_rate = (long double)(instr_stalls * 100) / (long double)total;
-
-    cout << endl << endl << "Overall Performance Breakdown: " << endl;
-    cout << "==============================" << endl;
-    cout << "Instruction Execution: " << instr_exec/MILLION << "M cycles ( " << instr_exec_rate << "%)" << endl;
-    cout << "Data Cache Stalls: " << data_stalls/MILLION << "M cycles ( " << data_stall_rate << "%)" << endl;
-    cout << "Instruction Cache Stalls: " << instr_stalls/MILLION << "M cycles ( " << instr_stall_rate << "%)" << endl;
-    cout << "------------------------------------------------" << endl;
-    cout << "Total Execution Time: " << total/MILLION << "M cycles ( " << "100" << "%)" << endl << endl;
-
-    cout << "Data Cache:" << endl;
-    cout << "===========" << endl;
-
-    if (data_cache->associativity == 1)
-        cout << "Configuration: size = " << data_cache->size << "KB, line size = " << data_cache->line_size << "B, associativity = " << "DirectMapped" << ", miss latency = " << data_cache->miss_penalty << " cycles" << endl;
-    else
-        cout << "Configuration: size = " << data_cache->size << "KB, line size = " << data_cache->line_size << "B, associativity = " << "2-way" << ", miss latency = " << data_cache->miss_penalty << " cycles" << endl;
-
-    long double data_miss_rate = (long double)(data_cache->misses) * 100 / (long double) data_cache->accesses;
-    cout << "Overall Performance: " << data_cache->accesses/MILLION << "M References, " << data_cache->misses/MILLION << "M Misses, Miss Rate = " << data_miss_rate << "%, Data Cache Stalls = " << data_cache->misses*data_cache->miss_penalty/MILLION << "M cycles" << endl << endl;
-    cout << "Rank ordering of data references by absolute miss cycles:" << endl << endl;
-
-    cout << "\tPC\t\t| Type\t| References\t|Misses\t| Miss Rate\t| Total Miss Cycles\t| Contribution to Total Data Miss Cycles" << endl;
-    cout << "\t--------------------------------------------------------------------------------------------------------" << endl;
-
-    data_cache->compute_ordered_misses(NUM_ORDERED_ACCESS_MISSES);
-    int i = 0;
-    for (Access *acc : data_cache->ordered_accesses){
-        i++;
-        stringstream stream;
-        stream << "0x" << hex << acc->address;
-        string address_hex( stream.str() );
-        cout << i << ". \t"  
-        << address_hex << "\t| " 
-        << (acc->type? "Load" : "Store") << "\t| " 
-        << acc->count/(long double)THOUSAND << "K\t\t| " 
-        << acc->misses/(long double)THOUSAND << "K\t| " 
-        << (long double)acc->misses / (long double)acc->count << "\t\t| " 
-        << acc->misses*data_cache->miss_penalty/MILLION << "M\t\t| " 
-        << (long double)(acc->misses*data_cache->miss_penalty)*100 / (long double)data_stalls  << "%" << endl;
-    }
-
-    cout << endl;
-    
-    cout << "Instruction Cache:" << endl;
-    cout << "==================" << endl;
-    if (instr_cache->associativity == 1)
-        cout << "Configuration: size = " << instr_cache->size << "KB, line size = " << instr_cache->line_size << "B, associativity = " << "DirectMapped" << ", miss latency = " << instr_cache->miss_penalty << " cycles" << endl;
-    else
-        cout << "Configuration: size = " << instr_cache->size << "KB, line size = " << instr_cache->line_size << "B, associativity = " << "2-way" << ", miss latency = " << instr_cache->miss_penalty << " cycles" << endl;
-    
-    long double instr_miss_rate = (long double)(instr_cache->misses) * 100 / (long double) instr_cache->accesses;
-    cout << "Overall Performance: " << instr_cache->accesses/THOUSAND << "K References, " << instr_cache->misses/THOUSAND << "K Misses, Miss Rate = " << instr_miss_rate << "%, Inst Cache Stalls = " << instr_cache->misses*instr_cache->miss_penalty/MILLION << "M cycles" << endl << endl;
-    cout << "Rank ordering of instruction references by absolute miss cycles:" << endl;
-
-    cout << "\tPC\t\t| References\t|Misses\t| Miss Rate\t| Total Miss Cycles\t| Contribution to Total Inst Miss Cycles" << endl;
-    cout << "\t--------------------------------------------------------------------------------------------------------" << endl;
-
-    instr_cache->compute_ordered_misses(NUM_ORDERED_ACCESS_MISSES);
-    i = 0;
-    for (Access *acc : instr_cache->ordered_accesses){
-        i++;
-        stringstream stream;
-        stream << "0x" << hex << acc->address;
-        string address_hex( stream.str() );
-        cout << i << ". \t"  
-            << address_hex << "\t| " 
-            << acc->count/(long double)THOUSAND << "K\t\t| " 
-            << acc->misses/(long double)THOUSAND << "K\t| " 
-            << (long double)acc->misses / (long double)acc->count << "\t\t| " 
-            << acc->misses*instr_cache->miss_penalty/THOUSAND << "K\t\t| " 
-            << (long double)(acc->misses*instr_cache->miss_penalty)*100 / (long double)instr_stalls << "%"  << endl;
-    }
+    print_combined_key();
 }
 
 INT32 Usage(){
