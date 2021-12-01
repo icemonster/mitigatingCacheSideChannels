@@ -298,7 +298,7 @@ public:
             if (shared) {} // attack 2
             else { // attack 1
                 // call load and check if hit
-                bool hit = data_cache_load() // arguments? (how to check if hit?)
+                bool hit = data_cache_load(); // arguments? (how to check if hit?)
                 hits.push_back(hit);
                 
                 // update wait time
@@ -388,7 +388,7 @@ VOID Instruction(INS ins, VOID *v)
     }
     
     
-    // J
+    // J - random values computed statically here
     for (int i = 0; i < spy_count; i++) {
         if (rand() % 100 <= spy_probability) { // chance of spy instruction
             INS_InsertPredicatedCall(
