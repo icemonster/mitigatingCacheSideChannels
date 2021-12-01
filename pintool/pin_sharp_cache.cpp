@@ -25,6 +25,12 @@ typedef struct Way_Struct {
     unsigned long tag;
 } Way;
 
+/* Adjust these values at will */
+bool multi_spy; // attack 1
+bool shared_l2; // attack 2
+int spy_count;
+int spy_probability;
+
 class Access {
     public:
         unsigned long address;
@@ -101,10 +107,10 @@ class Cache {
             sharp = sp;
             alarm_counter = 0;
             
-            owner = malloc (sizeof (int *) * set_number);
+            owner = (int **) malloc (sizeof(int *) * set_number);
             
             for (unsigned long i = 0; i < set_number; i++){
-                owner[i] = malloc (sizeof (int) * associativity);
+                owner[i] = (int *) malloc(sizeof(int) * associativity);
                 for (unsigned long j = 0; j < associativity; j++){
                     owner[i][j] = -1 ;
                 }
@@ -191,7 +197,7 @@ class Cache {
             int candidate = -1;
             
             // STEP 1: check if a way is unused
-            for (int i = 0; i < associativity; i++) {
+            for (unsigned int i = 0; i < associativity; i++) {
                 if (owner[set][i] == -1) {
                     candidate = i;
                     break;
@@ -200,12 +206,12 @@ class Cache {
             if (candidate > -1) {
                 ways[candidate].valid = true;
                 ways[candidate].tag = addr & tag_mask;
-                owner[set][i] = core;
+                owner[set][candidate] = core;
                 return;
             }
             
             // STEP 2: check if a way is owned by calling processor
-            for (int i = 0; i < associativity; i++) {
+            for (unsigned int i = 0; i < associativity; i++) {
                 if (owner[set][i] == core) {
                     candidate = i;
                     break;
@@ -214,7 +220,7 @@ class Cache {
             if (candidate > -1) {
                 ways[candidate].valid = true;
                 ways[candidate].tag = addr & tag_mask;
-                owner[set][i] = core;
+                owner[set][candidate] = core;
                 return;
             }
             
@@ -222,13 +228,13 @@ class Cache {
             candidate = rand() % associativity;
             ways[candidate].valid = true;
             ways[candidate].tag = addr & tag_mask;
-            owner[set][i] = core;
+            owner[set][candidate] = core;
             alarm_counter[core]++; // update alarm counter
             return;
   
         }
 
-        void access(unsigned long addr, bool is_load, unsigned long pc, int core){
+        bool access(unsigned long addr, bool is_load, unsigned long pc, int core){
             accesses++;
             
             pair<unsigned long, bool> key(pc, is_load);
@@ -254,15 +260,19 @@ class Cache {
                 access->misses = 1;
                 all_accesses[key] = access;
             }
+
+            return is_miss;
         }
 
-        void store(unsigned long addr, unsigned long pc, int core){
-            access(addr, false, pc, core);
+        bool store(unsigned long addr, unsigned long pc, int core){
+            return access(addr, false, pc, core);
         }
-        void load(unsigned long addr, unsigned long pc, int core){
-            access(addr, true, pc, core);
+        bool load(unsigned long addr, unsigned long pc, int core){
+            return access(addr, true, pc, core);
         }
 };
+
+BOOL data_cache_load(unsigned long addr, unsigned long pc, int core);
 
 // J
 class Spy {
@@ -298,7 +308,11 @@ public:
             if (shared) {} // attack 2
             else { // attack 1
                 // call load and check if hit
-                bool hit = data_cache_load(); // arguments? (how to check if hit?)
+                /*
+                    TODO: Choose good arguments
+                    TODO: How to check if it is a hit
+                */
+                bool hit = data_cache_load(0x0, 0x0, 0);
                 hits.push_back(hit);
                 
                 // update wait time
@@ -310,45 +324,43 @@ public:
             }
         }
     }
-}
+};
 
-//Cache *data_cache;
+Cache *data_cache;
 Cache *instr_cache;
 
 //J
 Cache *l1_cache;
 Cache *l2_cache;
 Cache *l3_cache;
-
-int spy_count;
-bool multi_spy; // attack 1
-bool shared_l2; // attack 2
-int spy_probability;
-Spy * spies;
+Spy ** spies;
 
 VOID instr_cache_load(unsigned long ip) {
 //    instr_cache->accesses++;
 //    instr_cache->load(ip, ip);
     // J
+    /*
+        TODO:   Pass the core argument correctly
+    */
     bool miss;
-    miss = instr_cache->load (ip, ip, core);
-    if (miss) miss = l2_cache->load (ip, ip, core);
-    if (miss) l3_cache->load (ip, ip, core);
+    miss = instr_cache->load (ip, ip, 0);
+    if (miss) miss = l2_cache->load (ip, ip, 0);
+    if (miss) l3_cache->load (ip, ip, 0);
 }
 
-VOID data_cache_load(unsigned long addr, unsigned long pc, int core){
+BOOL data_cache_load(unsigned long addr, unsigned long pc, int core){
     bool miss;
     miss = l1_cache->load (addr, pc, core);
-    if (miss) miss = l2_cache->load (add, pc, core);
-    if (miss) l3_cache->load (add, pc, core);
-    
+    if (miss) miss = l2_cache->load (addr, pc, core);
+    if (miss) l3_cache->load (addr, pc, core);
+    return miss;
 }
 
 VOID data_cache_store(unsigned long addr, unsigned long pc, int core){
     bool miss;
     miss = l1_cache->load (addr, pc, core);
-    if (miss) miss = l2_cache->load (add, pc, core);
-    if (miss) l3_cache->load (add, pc, core);
+    if (miss) miss = l2_cache->load (addr, pc, core);
+    if (miss) l3_cache->load (addr, pc, core);
 }
 
 VOID spy_instruction(int spy){
@@ -407,7 +419,7 @@ void print_combinded_key () {
         // combine hits from spies
         vector<int> combined_key;
         bool prev_all = true;
-        for (int i = 0; i < spies[0]->hits.size(); i++) {
+        for (unsigned int i = 0; i < spies[0]->hits.size(); i++) {
             int cnt = 0;
             int out = -1;
             for (int s = 0; s < spy_count; s++) {
@@ -420,11 +432,11 @@ void print_combinded_key () {
             // miss on last spy means exponent used
             else if (i%2==0 && !spies[0]->hits[i]) out = 1;
             else if (i%2==1 && !spies[spy_count-1]->hits[i]) out = 1;
-            prev_all = (cnr == spy_count);
+            prev_all = (cnt == spy_count);
             combined_key.push_back (out);
         }
         cout << "Combined Key: ";
-        for (int i = 0; i < combined_key.size(); i++) cout << combined_key[i] << " ";
+        for (unsigned int i = 0; i < combined_key.size(); i++) cout << combined_key[i] << " ";
         cout << endl;
     }
 }
@@ -532,7 +544,7 @@ int main(int argc, char **argv)
 
     PIN_Init(argc, argv);
     
-//    data_cache = new Cache(atoi(argv[5]), atoi(argv[6]), atoi(argv[7]), atoi(argv[8]));
+    data_cache = new Cache(atoi(argv[5]), atoi(argv[6]), atoi(argv[7]), atoi(argv[8]), false);
     instr_cache = new Cache(atoi(argv[5]), atoi(argv[6]), atoi(argv[7]), atoi(argv[8]), false);
     // J
     l1_cache = new Cache(8, 64, 100, 1, false);
@@ -545,7 +557,7 @@ int main(int argc, char **argv)
     
     shared_l2 = false;
     if (shared_l2) spy_count = 2;
-    spies = malloc (sizeof (Spy *) * spy_count);
+    spies = (Spy**) malloc (sizeof (Spy *) * spy_count);
     if (shared_l2) {
         spies[0] = new Spy (0); // shares L2
         spies[1] = new Spy (1); // different core
