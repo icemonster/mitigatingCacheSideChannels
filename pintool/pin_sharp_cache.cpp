@@ -63,6 +63,7 @@ class Cache {
 
         Way **sets;
     
+        // J
         // SHARP data
         bool sharp;
         unsigned long * alarm_counter;
@@ -184,6 +185,7 @@ class Cache {
             }
         }
     
+        // J
         void evict_sharp_block (unsigned long set, unsigned long addr, int core) {
             Way *ways = sets[set];
             int candidate = -1;
@@ -262,49 +264,58 @@ class Cache {
         }
 };
 
+// J
 class Spy {
 public:
     
     int spy_id;
     int ready;
     int cnt;
+    int wait_time;
     bool shared;
     vector<bool> hits;
     
-    
     Spy (int id) {
-        cnt = -1;
+        cnt = 0;
         ready = 0;
-        
+        wait_time = 30; //?
         spy_id = id;
         if (spy_id == 0 and shared_l2) shared = true;
         else shared = false;
     }
     
     void operate () {
-        if (cnt == -1) { // initial configuration
-            if (shared) {}
-            else {}
-            
+        cnt += 1;
+        if (cnt == 1) { // initial configuration
+            if (shared) {} // attack 2
+            else { // attack 1
+                int offset = wait_time - spy_id;
+                ready += offset;
+            }
             return;
         }
-        if (++cnt == ready) { // wait time over
-            if (shared) {}
-            else {
+        if (cnt == ready) { // wait time over
+            if (shared) {} // attack 2
+            else { // attack 1
                 // call load and check if hit
-                data_cache_load() // arguments? (how to check if hit?)
+                bool hit = data_cache_load() // arguments? (how to check if hit?)
+                hits.push_back(hit);
                 
                 // update wait time
-                ready += 30;
+                //   currently fine-grained, i.e., 1 unit difference between spies
+                int offset = 0;
+                if (cnt%2==1) offset = (wait_time + (spy_count - spy_id - 1)) - spy_id;
+                else offset = (wait_time + spy_id) - (spy_count - spy_id - 1);
+                ready += offset;
             }
         }
     }
-    
 }
 
 //Cache *data_cache;
 Cache *instr_cache;
 
+//J
 Cache *l1_cache;
 Cache *l2_cache;
 Cache *l3_cache;
@@ -318,7 +329,7 @@ Spy * spies;
 VOID instr_cache_load(unsigned long ip) {
 //    instr_cache->accesses++;
 //    instr_cache->load(ip, ip);
-    
+    // J
     bool miss;
     miss = instr_cache->load (ip, ip, core);
     if (miss) miss = l2_cache->load (ip, ip, core);
@@ -377,7 +388,7 @@ VOID Instruction(INS ins, VOID *v)
     }
     
     
-
+    // J
     for (int i = 0; i < spy_count; i++) {
         if (rand() % 100 <= spy_probability) { // chance of spy instruction
             INS_InsertPredicatedCall(
@@ -388,6 +399,34 @@ VOID Instruction(INS ins, VOID *v)
     }
     
     
+}
+
+// J
+void print_combinded_key () {
+    if (multi_spy) {
+        // combine hits from spies
+        vector<int> combined_key;
+        bool prev_all = true;
+        for (int i = 0; i < spies[0]->hits.size(); i++) {
+            int cnt = 0;
+            int out = -1;
+            for (int s = 0; s < spy_count; s++) {
+                if (spies[s]->hits[i]) cnt++;
+            }
+            // all hits means no exponent
+            if (cnt == spy_count) out = 0;
+            // previous all hits and now miss means exponent used
+            else if (prev_all && cnt < spy_count) out = 1;
+            // miss on last spy means exponent used
+            else if (i%2==0 && !spies[0]->hits[i]) out = 1;
+            else if (i%2==1 && !spies[spy_count-1]->hits[i]) out = 1;
+            prev_all = (cnr == spy_count);
+            combined_key.push_back (out);
+        }
+        cout << "Combined Key: ";
+        for (int i = 0; i < combined_key.size(); i++) cout << combined_key[i] << " ";
+        cout << endl;
+    }
 }
 
 VOID Fini(INT32 code, VOID *v)
@@ -495,7 +534,7 @@ int main(int argc, char **argv)
     
 //    data_cache = new Cache(atoi(argv[5]), atoi(argv[6]), atoi(argv[7]), atoi(argv[8]));
     instr_cache = new Cache(atoi(argv[5]), atoi(argv[6]), atoi(argv[7]), atoi(argv[8]), false);
-
+    // J
     l1_cache = new Cache(8, 64, 100, 1, false);
     l2_cache = new Cache(8, 64, 100, 2, false);
     l3_cache = new Cache(8, 64, 100, 4, true); // l3 uses SHARP
