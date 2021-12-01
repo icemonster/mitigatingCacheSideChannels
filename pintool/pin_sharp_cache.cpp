@@ -7,6 +7,8 @@
 #include <stdlib.h>
 #include "pin.H"
 
+#define LINE_SIZE 64
+
 using namespace std;
 
 typedef struct Way_Struct {
@@ -192,7 +194,7 @@ class Cache {
   
         }
 
-        bool access(unsigned long addr, bool is_load, unsigned long pc, int core){
+        bool access(unsigned long addr, bool is_load, int core){
             accesses++;
             
             pair<unsigned long, bool> key(pc, is_load);
@@ -212,15 +214,15 @@ class Cache {
             return is_miss;
         }
 
-        bool store(unsigned long addr, unsigned long pc, int core){
-            return access(addr, false, pc, core);
+        bool store(unsigned long addr, int core){
+            return access(addr, false, core);
         }
-        bool load(unsigned long addr, unsigned long pc, int core){
-            return access(addr, true, pc, core);
+        bool load(unsigned long addr, int core){
+            return access(addr, true, core);
         }
 };
 
-BOOL data_cache_load(unsigned long addr, unsigned long pc, int core);
+BOOL data_cache_load(unsigned long addr, int core);
 
 // J
 class Spy {
@@ -257,10 +259,10 @@ public:
             else { // attack 1
                 // call load and check if hit
                 /*
-                    TODO: Choose good arguments
+                    TODO: Choose good address and core
                     TODO: How to check if it is a hit
                 */
-                bool hit = data_cache_load(0x0, 0x0, 0);
+                bool hit = data_cache_load(0x0, 0);
                 hits.push_back(hit);
                 
                 // update wait time
@@ -283,21 +285,21 @@ VOID instr_cache_load(unsigned long ip) {
         TODO:   Pass the core argument correctly
     */
     bool miss;
-    miss = l2_cache->load (ip, ip, 0);
-    if (miss) l3_cache->load (ip, ip, 0);
+    miss = l2_cache->load (ip, 0);
+    if (miss) l3_cache->load (ip, 0);
 }
 
-BOOL data_cache_load(unsigned long addr, unsigned long pc, int core){
+BOOL data_cache_load(unsigned long addr, int core){
     bool miss;
-    miss = l2_cache->load (addr, pc, core);
-    if (miss) l3_cache->load (addr, pc, core);
+    miss = l2_cache->load (addr, core);
+    if (miss) l3_cache->load (addr, core);
     return miss;
 }
 
-VOID data_cache_store(unsigned long addr, unsigned long pc, int core){
+VOID data_cache_store(unsigned long addr, int core){
     bool miss;
-    miss = l2_cache->load (addr, pc, core);
-    if (miss) l3_cache->load (addr, pc, core);
+    miss = l2_cache->load (addr, core);
+    if (miss) l3_cache->load (addr, core);
 }
 
 VOID spy_instruction(int spy){
@@ -318,7 +320,6 @@ VOID Instruction(INS ins, VOID *v)
             INS_InsertPredicatedCall(
                 ins, IPOINT_BEFORE,  (AFUNPTR) data_cache_load,
                 IARG_MEMORYOP_EA, memOp,
-                IARG_UINT64, ip,
                 IARG_UINT64, 0,
                 IARG_END);
         }
@@ -330,7 +331,6 @@ VOID Instruction(INS ins, VOID *v)
             INS_InsertPredicatedCall(
                 ins, IPOINT_BEFORE,  (AFUNPTR) data_cache_store,
                 IARG_MEMORYOP_EA, memOp,
-                IARG_UINT64, ip,
                 IARG_UINT64, 0,
                 IARG_END);
         }
@@ -389,25 +389,28 @@ INT32 Usage(){
     return -1;
 }
 
-int main(int argc, char **argv)
+int main2(int argc, char **argv)
 {
-
-    srand(0);
-    
-    if (argc < 11){
-        return Usage();
-    }
-
-    PIN_Init(argc, argv);
-    
-    l2_cache = new Cache(8, 64, 100, 2, false);
-    l3_cache = new Cache(8, 64, 100, 4, true); // l3 uses SHARP
+    spy_probability = 90; // chances a spy will insert an instruction
     
     // select attack
     multi_spy = true;
-    spy_count = 4;
-    
     shared_l2 = false;
+    spy_count = 4;
+
+    srand(0);
+    
+    /*if (argc < 11){
+        return Usage();
+    }*/
+
+    PIN_Init(argc, argv);
+    
+    /* Parameters taken from a real i7 processor */
+    l2_cache = new Cache(256, LINE_SIZE, 100, 4, false);
+    l3_cache = new Cache(12288, LINE_SIZE, 100, 16, true); // l3 uses SHARP
+    
+    
     if (shared_l2) spy_count = 2;
     spies = (Spy**) malloc (sizeof (Spy *) * spy_count);
     if (shared_l2) {
@@ -420,12 +423,8 @@ int main(int argc, char **argv)
         }
     }
     
-    spy_probability = 90; // chances a spy will insert an instruction
-    
+
     INS_AddInstrumentFunction(Instruction, 0);
-
-    /* Implement your cache simulator here */
-
     PIN_AddFiniFunction(Fini, 0);
     
     // Start the program, never returns
