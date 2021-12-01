@@ -274,40 +274,29 @@ public:
     }
 };
 
-Cache *data_cache;
-Cache *instr_cache;
-
-//J
-Cache *l1_cache;
 Cache *l2_cache;
 Cache *l3_cache;
 Spy ** spies;
 
 VOID instr_cache_load(unsigned long ip) {
-//    instr_cache->accesses++;
-//    instr_cache->load(ip, ip);
-    // J
     /*
         TODO:   Pass the core argument correctly
     */
     bool miss;
-    miss = instr_cache->load (ip, ip, 0);
-    if (miss) miss = l2_cache->load (ip, ip, 0);
+    miss = l2_cache->load (ip, ip, 0);
     if (miss) l3_cache->load (ip, ip, 0);
 }
 
 BOOL data_cache_load(unsigned long addr, unsigned long pc, int core){
     bool miss;
-    miss = l1_cache->load (addr, pc, core);
-    if (miss) miss = l2_cache->load (addr, pc, core);
+    miss = l2_cache->load (addr, pc, core);
     if (miss) l3_cache->load (addr, pc, core);
     return miss;
 }
 
 VOID data_cache_store(unsigned long addr, unsigned long pc, int core){
     bool miss;
-    miss = l1_cache->load (addr, pc, core);
-    if (miss) miss = l2_cache->load (addr, pc, core);
+    miss = l2_cache->load (addr, pc, core);
     if (miss) l3_cache->load (addr, pc, core);
 }
 
@@ -396,7 +385,7 @@ VOID Fini(INT32 code, VOID *v)
 
 INT32 Usage(){
     cerr << "Our cache simulator tool." << endl;
-    cerr << "Usage: pin -t obj-intel64/pin_cache.so <cacheSize> <lineSize> <missPenalty> <associativity> -- cache_test/MMM.out " << endl;
+    cerr << "Usage: pin -t obj-intel64/pin_sharp_cache.so -- cache_test/MMM.out " << endl;
     return -1;
 }
 
@@ -411,10 +400,6 @@ int main(int argc, char **argv)
 
     PIN_Init(argc, argv);
     
-    data_cache = new Cache(atoi(argv[5]), atoi(argv[6]), atoi(argv[7]), atoi(argv[8]), false);
-    instr_cache = new Cache(atoi(argv[5]), atoi(argv[6]), atoi(argv[7]), atoi(argv[8]), false);
-    // J
-    l1_cache = new Cache(8, 64, 100, 1, false);
     l2_cache = new Cache(8, 64, 100, 2, false);
     l3_cache = new Cache(8, 64, 100, 4, true); // l3 uses SHARP
     
@@ -450,10 +435,5 @@ int main(int argc, char **argv)
 
 /* 
     Test with:
-        pin -t obj-intel64/pin_cache.so 8 64 100 1 -- cache_test/MMM.out 
-        pin -t obj-intel64/pin_cache.so 8 64 100 2 -- cache_test/MMM.out  
-        pin -t obj-intel64/pin_cache.so 8 128 100 2 -- cache_test/MMM.out  
-        pin -t obj-intel64/pin_cache.so 32 128 100 2 -- cache_test/MMM.out  
-
-        And the other sample targets too
+        pin -t obj-intel64/pin_sharp_cache.so -- cache_test/MMM.out 
 */
