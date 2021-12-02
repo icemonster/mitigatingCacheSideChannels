@@ -13,7 +13,7 @@ using namespace std;
 
 typedef struct Way_Struct {
     bool valid;
-    bool lru;
+    unsigned int lru;
     unsigned long tag;
 } Way;
 
@@ -22,23 +22,6 @@ bool multi_spy; // attack 1
 bool shared_l2; // attack 2
 int spy_count;
 int spy_probability;
-
-class Access {
-    public:
-        unsigned long address;
-        unsigned long count;
-        unsigned long misses;
-        bool type;
-        Access(unsigned long a, bool t, unsigned long c, unsigned long m){
-            address = a;
-            type = t;
-            count = c;
-            misses = m;
-        } 
-};
-
-bool better_access (Access *i,Access *j) { return (i->misses>j->misses); }
-
 
 class Cache {
     public:
@@ -89,7 +72,7 @@ class Cache {
                 sets[i] = (Way*)malloc(sizeof(Way)*associativity);
                 for (unsigned long j = 0; j < associativity; j++){
                     sets[i][j].valid = false;
-                    sets[i][j].lru = true;
+                    sets[i][j].lru = 0;
                 }
             }
             
@@ -116,15 +99,17 @@ class Cache {
 
         bool find_tag_in_set(unsigned long set, unsigned long addr){
             Way *ways = sets[set];
-            // TODO: updated for set size greater than 2
+
+            unsigned int maximum = 0;
+            for (unsigned long way = 0; way < associativity; way++){
+                if (ways[way].lru > maximum){
+                    maximum = ways[way].lru;
+                }
+            }
 
             for (unsigned long i = 0; i < associativity; i++){
                 if (ways[i].valid && tags_equal(addr, ways[i].tag)){
-                    ways[i].lru = false;
-                    
-                    if (associativity > 1)
-                        ways[1-i].lru = true;
-                        
+                    ways[i].lru = maximum+1; /* Most recently used address, so lru is max LRU + 1 */
                     return false;
                 }
             }
@@ -132,37 +117,67 @@ class Cache {
             return true;
         }
 
+        void swap(unsigned long *lrus, unsigned long *ways, int index1, int index2){
+            unsigned long temp1 = lrus[index1];
+            unsigned long temp2 = ways[index1];
+            lrus[index1] = lrus[index2];
+            ways[index1] = ways[index2];
+            lrus[index2] = temp1;
+            ways[index2] = temp2;
+        }
+
+        void sort_lru_list(unsigned long *ways, unsigned long set){
+            /* Sort ways in a set so that we can iterate them by LRU order */
+            unsigned long lrus[associativity];
+
+            for (unsigned long way = 0; way < associativity; way++){
+                ways[way] = way;
+                lrus[way] = sets[set][way].lru;
+            }
+
+            /* I mean, max associativity is not that high, we can do bubble sort */
+            for(unsigned int i = 0; i < associativity-1; i++){
+                for (unsigned j = 0; j < associativity - i - 1; j++){
+                    if (lrus[j] > lrus[j+1]){
+                        swap(lrus, ways, j, j+1);
+                    }
+                }
+            }
+
+        }
+
         void evict_lru_block(unsigned long set, unsigned long addr){
             Way *ways = sets[set];
-            // TODO: updated for set size greater than 2
-            if (associativity == 1){
-                ways[0].valid = true;
-                ways[0].tag = addr & tag_mask;
-            }
-            else{
-                int i = 0;
-                if (ways[1].lru){
-                    i = 1;
-                }
-                ways[i].valid = true;
-                ways[i].tag = addr & tag_mask;
-                ways[i].lru = false;
-                ways[1-i].lru = true;
-            }
+
+            unsigned long ways_list[associativity];
+            sort_lru_list(ways_list, set);
+
+            unsigned int way = ways_list[0];
+            ways[way].valid = true;
+            ways[way].tag = addr & tag_mask;
+
+            ways[way].lru = ways[ways_list[associativity-1]].lru + 1;
         }
     
         // J
         void evict_sharp_block (unsigned long set, unsigned long addr, int core) {
             Way *ways = sets[set];
+
+            unsigned long ways_list[associativity];
+            sort_lru_list(ways_list, set);
+            unsigned long way;
+
             int candidate = -1;
             
             // STEP 1: check if a way is unused
             for (unsigned int i = 0; i < associativity; i++) {
-                if (owner[set][i] == -1) {
-                    candidate = i;
+                way = ways_list[i]; /* Access way in LRU order */
+                if (owner[set][way] == -1) {
+                    candidate = way;
                     break;
                 }
             }
+
             if (candidate > -1) {
                 ways[candidate].valid = true;
                 ways[candidate].tag = addr & tag_mask;
@@ -172,6 +187,7 @@ class Cache {
             
             // STEP 2: check if a way is owned by calling processor
             for (unsigned int i = 0; i < associativity; i++) {
+                way = ways_list[i];
                 if (owner[set][i] == core) {
                     candidate = i;
                     break;
@@ -197,8 +213,6 @@ class Cache {
         bool access(unsigned long addr, bool is_load, int core){
             accesses++;
             
-            pair<unsigned long, bool> key(pc, is_load);
-
             unsigned long set = get_set_index(addr);
 
 
@@ -219,6 +233,17 @@ class Cache {
         }
         bool load(unsigned long addr, int core){
             return access(addr, true, core);
+        }
+
+        void print_contents(){
+            unsigned long set_number = size * 1024 / line_size / associativity;
+            for (unsigned long set = 0; set < set_number; set++){
+                for (unsigned int way = 0; way < associativity; way++){
+                    if (sets[set][way].valid){
+                        cout << "Set: " << set << " Way: " << way << " Tag: " << sets[set][way].tag << " (" << sets[set][way].lru << ")" << endl;
+                    }
+                }
+            }
         }
 };
 
@@ -389,7 +414,39 @@ INT32 Usage(){
     return -1;
 }
 
-int main2(int argc, char **argv)
+
+int main_test_caches(int argc, char **argv){
+    /* Test new changes to Caches,
+         considering associativity could be larger than 2, 
+         and we now load from multiple caches
+    */
+
+    unsigned int assoc_l2 = 4;
+    unsigned int assoc_l3 = 16;
+    unsigned long set_number_l2 = 256 * 1024 / LINE_SIZE / assoc_l2;
+
+    l2_cache = new Cache(256, LINE_SIZE, 100, assoc_l2, false);
+    l3_cache = new Cache(12288, LINE_SIZE, 100, assoc_l3, true); // l3 uses SHARP
+    
+    //BOOL data_cache_load(unsigned long addr, int core);
+
+    data_cache_load(0, 0);
+    data_cache_load(LINE_SIZE*set_number_l2, 0);
+    data_cache_load(LINE_SIZE*set_number_l2*2, 0);
+    data_cache_load(LINE_SIZE*set_number_l2*3, 0);
+    data_cache_load(LINE_SIZE*set_number_l2*4, 0);
+    data_cache_load(LINE_SIZE*set_number_l2*5, 0);
+    data_cache_load(LINE_SIZE*set_number_l2*6, 0);
+    data_cache_load(LINE_SIZE*set_number_l2*7, 0);
+
+    cout << "Loaded 4 colliding addresses" << endl;
+    cout << "L2 cache" << endl; l2_cache->print_contents();
+    cout << "L3 cache" << endl; l3_cache->print_contents();
+
+    return 0;
+}
+
+int main(int argc, char **argv)
 {
     spy_probability = 90; // chances a spy will insert an instruction
     
@@ -433,6 +490,8 @@ int main2(int argc, char **argv)
 }
 
 /* 
+    Compile with:
+        make obj-intel64/pin_sharp_cache.so
     Test with:
-        pin -t obj-intel64/pin_sharp_cache.so -- cache_test/MMM.out 
+        pin -t obj-intel64/pin_sharp_cache.so -- ./rsa
 */
