@@ -170,7 +170,7 @@ class Cache {
         }
 
         unsigned long reconstruct_addr(unsigned long tag, unsigned long set){
-            return (tag*exp2(set_bits) + set)*exp2(blk_bits);
+            return (set << blk_bits) + tag;
         }
 
         void evict_lru_block(CacheAnswer *result, unsigned long set, unsigned long addr){
@@ -271,6 +271,10 @@ class Cache {
             bool is_miss = find_tag_in_set(set, addr);
 
             result->miss = is_miss;
+            result->penalty = 1;
+            result->evicted = false;
+            result->evicted_addr = 0;
+            result->evicted_core = 0;
 
             if (is_miss){
                 result->penalty = miss_penalty;
@@ -303,7 +307,7 @@ Cache *l3_cache;
 bool aligned_addr(unsigned long addr){
     return (addr & (LINE_SIZE-1)) != 0;
 }
-bool load(unsigned long addr, int core){
+unsigned long load(unsigned long addr, int core){
     /* Function responsible for loading a block from a cache hierarchy
          and implementing snoopy protocol / invalidate */
 
@@ -374,12 +378,18 @@ bool load(unsigned long addr, int core){
         }
     }
 
-    if (l2_answer.miss){
-        return l3_answer.penalty;
+    if (core == 0){
+        if (l2_answer.miss){
+            return l3_answer.penalty;
+        }
+        else{
+            return l2_answer.penalty;
+        }
     }
     else{
-        return l2_answer.penalty;
+        return l3_answer.penalty;
     }
+    
 }
 
 class Spy {
@@ -389,18 +399,19 @@ public:
     int ready;
     int cnt;
     int wait_time;
-    bool shared;
     vector<bool> hits;
     unsigned long set_number_l3;
-    
+    unsigned long set_number_l2;
+    bool iteration_started;
+
     Spy (int id) {
         cnt = 0;
         ready = 0;
         wait_time = 30; //?
         spy_id = id; /* Also represents the core it is located in */
-        if (spy_id == 0 and shared_l2) shared = true;
-        else shared = false;
         set_number_l3 = l3_cache->size * 1024 / LINE_SIZE / l3_cache->associativity;
+        set_number_l2 = l2_cache->size * 1024 / LINE_SIZE / l2_cache->associativity;
+        iteration_started = false;
     }
     
     void operate () {
@@ -408,15 +419,71 @@ public:
         /* Described as a state machine depending on the value of cnt */
         cnt += 1;
         if (cnt == 1) { // initial configuration
-            if (shared) {} // attack 2
+            if (shared_l2) {
+                // attack 2
+                if (spy_id == 0) /* First spy just waits */
+                    ready += 1;
+                else { /* Second spy can start filling an L3 cache */
+                    /* Fill up square set */
+                    for (unsigned int i = 1; i < L3_ASSOC+1; i++){
+                        load(square_addr + LINE_SIZE*set_number_l3*i, spy_id);
+                    }
+
+                    /* Fill up multiply set. Waiting does not really matter, we can do this at startup  */
+                    for (unsigned int i = 1; i < L3_ASSOC+1; i++){
+                        load(multiply_addr + LINE_SIZE*set_number_l3*i, spy_id);
+                    }
+                    ready += 1000;
+
+                }
+            } 
             else { // attack 1
                 int offset = wait_time - spy_id;
                 ready += offset;
             }
             return;
         }
-        if (cnt == ready) { // wait time over
-            if (shared) {} // attack 2
+        if (cnt >= ready) { // wait time over
+            if (shared_l2) {
+                // attack 2
+                if (spy_id == 0){
+                    // Constantly evict square_addr and multiply_addr from L2 cache, but not from L3
+                    for (unsigned int i = 1; i < L2_ASSOC+1; i++){
+                        load(square_addr + LINE_SIZE*set_number_l2*i, spy_id);
+                        load(multiply_addr + LINE_SIZE*set_number_l2*i, spy_id);
+                    }
+                    ready += 1;
+                }
+                else{
+                    /* Check iteration start (square_addr), 
+                        and when it finally starts, check if previous iteration has miss for multiply_addr */
+                    unsigned long time_to_wait = 0;
+                    if (iteration_started == false){
+                        for (unsigned int i = 1; i < L3_ASSOC+1; i++){
+                            time_to_wait = load(square_addr + LINE_SIZE*set_number_l3*i, spy_id);
+                            if (time_to_wait >= 36){ // Cheating for now
+                                iteration_started = true;
+                                cout << "Leaked that iteration started " << endl;
+                                break;
+                            }
+                        }
+                        ready += 200;
+                    }
+                    else{
+                        bool exponent_is_1 = false;
+                        for (unsigned int i = 1; i < L3_ASSOC+1; i++){
+                            time_to_wait = load(multiply_addr + LINE_SIZE*set_number_l3*i, spy_id);
+                            if (time_to_wait >= 36){ // Cheating for now
+                                exponent_is_1 = true;
+                            }
+                        }
+                        cout << "Leaked that exponent is " << exponent_is_1 << endl;
+                        hits.push_back(exponent_is_1);
+                        iteration_started = false;
+                        ready += 1;
+                    }
+                }
+            } 
             else { // attack 1
                 // call load and check if hit
                 /*
@@ -557,6 +624,16 @@ void print_combined_key () {
         for (unsigned int i = 0; i < combined_key.size(); i++) cout << combined_key[i];
         cout << endl;
     }
+    else{
+        cout << "Key: ";
+        for (unsigned int i = 0; i < spies[1]->hits.size(); i++){
+            if (spies[1]->hits[i])
+                cout << "1";
+            else
+                cout << "0";
+        }
+        cout << endl;
+    }
 }
 
 VOID Fini(INT32 code, VOID *v)
@@ -576,6 +653,114 @@ INT32 Usage(){
     cerr << "Our cache simulator tool." << endl;
     cerr << "Usage: pin -t obj-intel64/pin_sharp_cache.so <square_addr> <multiply_addr> -- ./rsa " << endl;
     return -1;
+}
+
+void test_second_atk_simplified(){
+    /* Test technique used in our second attack. */
+    unsigned long set_number_l2 = 256 * 1024 / LINE_SIZE / L2_ASSOC;
+    unsigned long set_number_l3 = 16384 * 1024 / LINE_SIZE / L3_ASSOC;
+
+    number_cores = 2;
+    square_addr = 0x401697;
+    multiply_addr = 0x4016dc;
+
+    l2_cache = new Cache(256, LINE_SIZE, 12, L2_ASSOC, false);
+    l3_cache = new Cache(16384, LINE_SIZE, 36, L3_ASSOC, true); // l3 uses SHARP
+    
+    for (unsigned int i = 1; i < L3_ASSOC+1; i++){
+        load(square_addr + LINE_SIZE*set_number_l3*i, 1);
+        load(multiply_addr + LINE_SIZE*set_number_l3*i, 1);
+    }
+
+    cout << endl << endl << "Spy1 fills up sets corresponding to square and multiply calls" << endl;
+    cout << "L3 cache" << endl; l3_cache->print_contents();
+
+    for (unsigned int i = 1; i < L3_ASSOC+1; i++){
+        unsigned long time_to_wait = load(square_addr + LINE_SIZE*set_number_l3*i, 1);
+        if (time_to_wait >= 36){
+            cout << "This should not be printed" << endl;
+            break;
+        }
+    }
+
+    load(square_addr, 0);
+    cout << endl << endl << "Victim calls square" << endl;
+    cout << "L2 cache" << endl; l2_cache->print_contents();
+    cout << "L3 cache" << endl; l3_cache->print_contents();
+
+    cout << "Square address is located at " << square_addr << endl;
+    for (unsigned int i = 1; i < L2_ASSOC+1; i++){
+        load(square_addr + LINE_SIZE*set_number_l2*i, 0);
+        load(multiply_addr + LINE_SIZE*set_number_l2*i, 0);
+    }
+    cout << endl << endl << "Spy0 should have evicted square" << endl;
+    cout << "L2 cache" << endl; l2_cache->print_contents();
+    cout << "L3 cache" << endl; l3_cache->print_contents();
+
+    for (unsigned int i = 1; i < L3_ASSOC+1; i++){
+        unsigned long time_to_wait = load(square_addr + LINE_SIZE*set_number_l3*i, 1);
+        if (time_to_wait >= 36){
+            cout << "This should be printed" << endl;
+        }
+    }
+
+    for (unsigned int i = 1; i < L3_ASSOC+1; i++){
+        unsigned long time_to_wait = load(square_addr + LINE_SIZE*set_number_l3*i, 1);
+        if (time_to_wait >= 36){
+            cout << "This should not be printed" << endl;
+        }
+    }
+
+    for (unsigned int i = 1; i < L2_ASSOC+1; i++){
+        load(square_addr + LINE_SIZE*set_number_l2*i, 0);
+        load(multiply_addr + LINE_SIZE*set_number_l2*i, 0);
+    }
+
+    for (unsigned int i = 1; i < L3_ASSOC+1; i++){
+        unsigned long time_to_wait = load(square_addr + LINE_SIZE*set_number_l3*i, 1);
+        if (time_to_wait >= 36){
+            cout << "This should not be printed" << endl;
+        }
+    }
+
+    load(multiply_addr, 0);
+    cout << endl << endl << "Victim calls multiply" << endl;
+    cout << "L2 cache" << endl; l2_cache->print_contents();
+    cout << "L3 cache" << endl; l3_cache->print_contents();
+
+    for (unsigned int i = 1; i < L2_ASSOC+1; i++){
+        load(square_addr + LINE_SIZE*set_number_l2*i, 0);
+        load(multiply_addr + LINE_SIZE*set_number_l2*i, 0);
+    }
+
+    for (unsigned int i = 1; i < L3_ASSOC+1; i++){
+        unsigned long time_to_wait = load(square_addr + LINE_SIZE*set_number_l3*i, 1);
+        if (time_to_wait >= 36){
+            cout << "This should not be printed" << endl;
+        }
+    }
+
+    load(square_addr, 0);
+    cout << endl << endl << "Victim calls square" << endl;
+    cout << "L2 cache" << endl; l2_cache->print_contents();
+    cout << "L3 cache" << endl; l3_cache->print_contents();
+
+    for (unsigned int i = 1; i < L2_ASSOC+1; i++){
+        load(square_addr + LINE_SIZE*set_number_l2*i, 0);
+        load(multiply_addr + LINE_SIZE*set_number_l2*i, 0);
+    }
+    cout << endl << endl << "Spy1 evicts everything" << endl;
+    cout << "L2 cache" << endl; l2_cache->print_contents();
+    cout << "L3 cache" << endl; l3_cache->print_contents();
+
+
+    for (unsigned int i = 1; i < L3_ASSOC+1; i++){
+        unsigned long time_to_wait = load(square_addr + LINE_SIZE*set_number_l3*i, 1);
+        if (time_to_wait >= 36){
+            cout << "This should be printed" << endl;
+        }
+    }
+
 }
 
 void test_evict_and_ownership(){
@@ -675,18 +860,22 @@ void test_caches(){
 
 int main(int argc, char **argv)
 {
-    /* Finish comment in this line for testing 
+    /* Finish comment in this line for testing
+    test_second_atk_simplified();
+    return 0;
+    
     test_evict_and_ownership();
     test_sharp();
     test_caches();
     return 0;
     // */
 
-    spy_probability = 90; // chances a spy will insert an instruction
+    spy_probability = 100; // chances a spy will insert an instruction
     
     // select attack
-    multi_spy = true;
-    shared_l2 = false;
+    multi_spy = false;
+    shared_l2 = true;
+
     if (shared_l2){
         spy_count = 2;
         number_cores = 2;
