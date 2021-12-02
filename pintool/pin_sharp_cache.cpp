@@ -11,6 +11,9 @@
 #define L2_ASSOC 4
 #define L3_ASSOC 16
 
+/* Assuming 1 cycle per instruction */
+#define CPI 1
+
 /*  SHARP, end of section 7.3, "Hence, we recommend to use SHARP4 and use a threshold of 2,000 alarm events in 1 billion cycles" */
 #define SHARP_ALARM_TIME_THRESHOLD 1000000000
 #define SHARP_ALARM_THRESHOLD 2000
@@ -22,6 +25,14 @@ typedef struct Way_Struct {
     unsigned int lru;
     unsigned long tag;
 } Way;
+
+typedef struct Cache_Answer {
+    bool miss; /* Whether it was a miss */
+    bool evicted; /* Whether a valid address was evicted */
+    unsigned long evicted_addr; /* Which addr was evicted if so */
+    unsigned int evicted_core; /* Core that the evicted addr belongs to. Only used for L3 evictions */
+    unsigned long penalty; /* Time penalty. If it was a hit, hit time. Otherwise, Miss time */
+} CacheAnswer;
 
 /* Adjust these values at will */
 bool multi_spy; // attack 1
@@ -158,7 +169,11 @@ class Cache {
 
         }
 
-        void evict_lru_block(unsigned long set, unsigned long addr){
+        unsigned long reconstruct_addr(unsigned long tag, unsigned long set){
+            return (tag*exp2(set_bits) + set)*exp2(blk_bits);
+        }
+
+        void evict_lru_block(CacheAnswer *result, unsigned long set, unsigned long addr){
             /* Usual eviction policy */
             Way *ways = sets[set];
 
@@ -167,6 +182,12 @@ class Cache {
 
             /* Just get the way with the minimum LRU value */
             unsigned int way = ways_list[0];
+            if (ways[way].valid == true){
+                result->evicted = true;
+                result->evicted_addr = reconstruct_addr(ways[way].tag, set);
+                result->evicted_core = 0; // Not used
+            }
+
             ways[way].valid = true;
             ways[way].tag = addr & tag_mask;
 
@@ -174,7 +195,7 @@ class Cache {
             ways[way].lru = ways[ways_list[associativity-1]].lru + 1;
         }
     
-        void evict_sharp_block (unsigned long set, unsigned long addr, int core) {
+        void evict_sharp_block (CacheAnswer *result, unsigned long set, unsigned long addr, int core) {
             /* Sharp's eviction policy */
             Way *ways = sets[set];
 
@@ -194,6 +215,9 @@ class Cache {
             }
 
             if (candidate > -1) {
+                result->evicted = false;
+                result->evicted_addr = 0;
+                result->evicted_core = 0;
                 ways[candidate].valid = true;
                 ways[candidate].tag = addr & tag_mask;
                 ways[candidate].lru = ways[ways_list[associativity-1]].lru + 1;
@@ -210,6 +234,11 @@ class Cache {
                 }
             }
             if (candidate > -1) {
+                if (ways[candidate].valid == true){
+                    result->evicted = true;
+                    result->evicted_addr = reconstruct_addr(ways[candidate].tag, set);
+                    result->evicted_core = core;
+                }
                 ways[candidate].valid = true;
                 ways[candidate].tag = addr & tag_mask;
                 ways[candidate].lru = ways[ways_list[associativity-1]].lru + 1;
@@ -219,7 +248,11 @@ class Cache {
             
             // STEP 3: evict something randomly
             candidate = rand() % associativity;
-
+            if (ways[candidate].valid == true){
+                result->evicted = true;
+                result->evicted_addr = reconstruct_addr(ways[candidate].tag, set);
+                result->evicted_core = owner[set][candidate];
+            }
             ways[candidate].valid = true;
             ways[candidate].tag = addr & tag_mask;
             ways[candidate].lru = ways[ways_list[associativity-1]].lru + 1;
@@ -229,21 +262,23 @@ class Cache {
   
         }
 
-        bool load(unsigned long addr, int core){
+        void load(CacheAnswer *result, unsigned long addr, int core){
+            /* Returns addr of entry evicted, or 0 if it was a hit */
             accesses++;
             
             unsigned long set = get_set_index(addr);
 
             bool is_miss = find_tag_in_set(set, addr);
 
+            result->miss = is_miss;
+
             if (is_miss){
+                result->penalty = miss_penalty;
                 misses++;
                 
-                if (sharp) evict_sharp_block (set, addr, core);
-                else evict_lru_block(set, addr);
+                if (sharp) evict_sharp_block (result, set, addr, core);
+                else evict_lru_block(result, set, addr);
             }
-
-            return is_miss;
         }
 
         void print_contents(){
@@ -265,22 +300,86 @@ class Cache {
 Cache *l2_cache;
 Cache *l3_cache;
 
-
+bool aligned_addr(unsigned long addr){
+    return (addr & (LINE_SIZE-1)) != 0;
+}
 bool load(unsigned long addr, int core){
     /* Function responsible for loading a block from a cache hierarchy
          and implementing snoopy protocol / invalidate */
-    bool miss;
+
+    CacheAnswer l2_answer;
+    CacheAnswer l3_answer;
+
+    /* Addresses must be aligned to 16 bits */
+    if (aligned_addr(addr)){
+        addr = addr - (addr & (LINE_SIZE-1));
+    }
 
     if (core == 0){
         /* Victim and Attacker0 have a different cache hierarchy for simplicity */
-        miss = l2_cache->load (addr, core);
-        if (miss) l3_cache->load (addr, core);
+        l2_cache->load (&l2_answer, addr, core);
+        if (l2_answer.miss){
+            if (l2_answer.evicted){
+                /* Update ownership in L3 */
+                unsigned long addr = l2_answer.evicted_addr;
+                unsigned long set = l3_cache->get_set_index(addr);
+                Way *ways = l3_cache->sets[set];
+                for (unsigned long way = 0; way < l3_cache->associativity; way++){
+                    if (ways[way].valid && l3_cache->tags_equal(addr, ways[way].tag)){
+                        l3_cache->owner[set][way] = -1;
+                        break;
+                    }
+                }
+            }
+                
+            l3_cache->load (&l3_answer, addr, core);
+            if (l3_answer.evicted){
+                if (l3_answer.evicted_core == 0){
+                    /* Evict from L2 cache from the proper core
+                            TODO: As soon as attackers start having an L2 as well, I also have to consider them
+                    */
+
+                    unsigned long addr = l3_answer.evicted_addr;
+                    unsigned long set = l2_cache->get_set_index(addr);
+                    Way *ways = l2_cache->sets[set];
+                    for (unsigned long way = 0; way < l2_cache->associativity; way++){
+                        if (ways[way].valid && l2_cache->tags_equal(addr, ways[way].tag)){
+                            ways[way].valid = false;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
     }
     else {
         /* TODO: Attackers access L3 cache directly for now */
-        miss = l3_cache->load(addr, core);
+        l3_cache->load(&l3_answer, addr, core);
+        if (l3_answer.evicted){
+            if (l3_answer.evicted_core == 0){
+                /* Evict from L2 cache from the proper core
+                        TODO: As soon as attackers start having an L2 as well, I also have to consider them
+                */
+
+                unsigned long addr = l3_answer.evicted_addr;
+                unsigned long set = l2_cache->get_set_index(addr);
+                Way *ways = l2_cache->sets[set];
+                for (unsigned long way = 0; way < l2_cache->associativity; way++){
+                    if (ways[way].valid && l2_cache->tags_equal(addr, ways[way].tag)){
+                        ways[way].valid = false;
+                        break;
+                    }
+                }
+            }
+        }
     }
-    return miss;
+
+    if (l2_answer.miss){
+        return l3_answer.penalty;
+    }
+    else{
+        return l2_answer.penalty;
+    }
 }
 
 class Spy {
@@ -324,8 +423,9 @@ public:
                     TODO: Choose good address
                     TODO: How to check if it is a hit
                 */
-                bool hit = load(LINE_SIZE*set_number_l3*spy_id, spy_id);
-                hits.push_back(hit);
+                unsigned time_to_wait = load(LINE_SIZE*set_number_l3*spy_id, spy_id);
+                ready += time_to_wait;
+                hits.push_back(true); /* TODO - Update algorithm accordingly. We no longer have a <hit> or <miss> indicator */
                 
                 // update wait time
                 //   currently fine-grained, i.e., 1 unit difference between spies
@@ -355,7 +455,7 @@ VOID instr_cache_load(unsigned long ip) {
     }
     /* ------------------------------ */
 
-    timestamp++; /* Time increases as victim executes instructions */
+    timestamp += CPI; /* Time increases as victim executes instructions */
     if (timestamp == SHARP_ALARM_TIME_THRESHOLD){
         /* Check if any of the alarms surpasses the defined threshold. Otherwise, reset them all */
         for (unsigned int i = 0; i < number_cores; i++){
@@ -431,6 +531,8 @@ void print_combined_key () {
     /* Computing the private key using information gathered 
         by all the spies AFTER the victim finishes executing.
             We do not need communication between spies during execution */
+
+    cout << "Computing combined key..." << endl;
     if (multi_spy) {
         // combine hits from spies
         vector<int> combined_key;
@@ -460,6 +562,7 @@ void print_combined_key () {
 VOID Fini(INT32 code, VOID *v)
 {
     cout << "Overall stats: " << endl;
+    cout << "Timestamp:" << timestamp << endl;
     for (unsigned int i = 0; i < number_cores; i++){
         printf("Alarm for core %d: %ld\n", i, l3_cache->alarm_counter[i]);
     }
@@ -475,11 +578,51 @@ INT32 Usage(){
     return -1;
 }
 
+void test_evict_and_ownership(){
+    /* Test ownership invalidation protocol when a cache line is evicted from the L2 */
+    unsigned long set_number_l2 = 256 * 1024 / LINE_SIZE / L2_ASSOC;
+    unsigned long set_number_l3 = 16384 * 1024 / LINE_SIZE / L3_ASSOC;
+
+    number_cores = 17;
+
+    l2_cache = new Cache(256, LINE_SIZE, 12, L2_ASSOC, false);
+    l3_cache = new Cache(16384, LINE_SIZE, 36, L3_ASSOC, true); // l3 uses SHARP
+
+    /* Initially load <L2_ASSOC> blocks from core 0 */
+    for (unsigned int i = 0; i < L2_ASSOC; i++){
+        load(LINE_SIZE*set_number_l2*i, 0);
+    }
+
+    cout << "L2 cache" << endl; l2_cache->print_contents();
+    cout << "L3 cache" << endl; l3_cache->print_contents();
+
+    /* Now, there is a set where all the ways are filled. Load one more address */
+    load(LINE_SIZE*set_number_l2*L2_ASSOC, 0);
+
+    /* The entry of the block that was evicted from the L3 cache should be owned by no one now */
+    cout << "L2 cache" << endl; l2_cache->print_contents();
+    cout << "L3 cache" << endl; l3_cache->print_contents();
+    cout << "Ownership test finished. Testing eviction from inclusivity ... " << endl;
+    srand(12); /* Made on purpose so the core 16th evicts the address at set 4096 and way 0 */
+    /* Now, using 16 attackers, evict the added block from the L3 cache */
+    unsigned long address_to_invalidate = LINE_SIZE*set_number_l2*L2_ASSOC;
+    for (int core = 1; core < 17; core++){
+        load(address_to_invalidate + LINE_SIZE*set_number_l3*L3_ASSOC*core, core);
+        cout << "L3 cache" << endl; l3_cache->print_contents();
+    }
+
+    /* L2 cache should now have that block invalidated */
+    cout << "L2 cache" << endl; l2_cache->print_contents();
+
+
+
+
+}
 void test_sharp(){
+    /* Test our SHARK implementation */
     unsigned long set_number_l3 = 16384 * 1024 / LINE_SIZE / L3_ASSOC;
     number_cores = 3;
 
-    /* Test our SHARP implementation */
     l2_cache = new Cache(256, LINE_SIZE, 12, L2_ASSOC, false);
     l3_cache = new Cache(16384, LINE_SIZE, 36, L3_ASSOC, true); // l3 uses SHARP
 
@@ -533,6 +676,7 @@ void test_caches(){
 int main(int argc, char **argv)
 {
     /* Finish comment in this line for testing 
+    test_evict_and_ownership();
     test_sharp();
     test_caches();
     return 0;
@@ -543,9 +687,14 @@ int main(int argc, char **argv)
     // select attack
     multi_spy = true;
     shared_l2 = false;
-    number_cores = 4;
-    if (shared_l2) spy_count = 2;
-    else           spy_count = L3_ASSOC;
+    if (shared_l2){
+        spy_count = 2;
+        number_cores = 2;
+    }
+    else{
+        spy_count = L3_ASSOC;
+        number_cores = L3_ASSOC + 1;
+    }
 
     srand(0); /* Make stuff deterministic for easier debugging */
     
