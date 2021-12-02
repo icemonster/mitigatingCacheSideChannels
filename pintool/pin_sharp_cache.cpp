@@ -23,6 +23,8 @@ bool shared_l2; // attack 2
 int spy_count;
 int spy_probability;
 
+unsigned long number_cores = 0;
+
 class Cache {
     public:
         unsigned long accesses;
@@ -77,7 +79,7 @@ class Cache {
             }
             
             sharp = sp;
-            alarm_counter = 0;
+            alarm_counter = (unsigned long*) malloc(sizeof(unsigned long)*number_cores);
             
             owner = (int **) malloc (sizeof(int *) * set_number);
             
@@ -168,7 +170,7 @@ class Cache {
             unsigned long way;
 
             int candidate = -1;
-            
+
             // STEP 1: check if a way is unused
             for (unsigned int i = 0; i < associativity; i++) {
                 way = ways_list[i]; /* Access way in LRU order */
@@ -184,7 +186,7 @@ class Cache {
                 owner[set][candidate] = core;
                 return;
             }
-            
+
             // STEP 2: check if a way is owned by calling processor
             for (unsigned int i = 0; i < associativity; i++) {
                 way = ways_list[i];
@@ -202,6 +204,7 @@ class Cache {
             
             // STEP 3: evict something randomly
             candidate = rand() % associativity;
+
             ways[candidate].valid = true;
             ways[candidate].tag = addr & tag_mask;
             owner[set][candidate] = core;
@@ -214,7 +217,6 @@ class Cache {
             accesses++;
             
             unsigned long set = get_set_index(addr);
-
 
             bool is_miss = find_tag_in_set(set, addr);
 
@@ -240,7 +242,10 @@ class Cache {
             for (unsigned long set = 0; set < set_number; set++){
                 for (unsigned int way = 0; way < associativity; way++){
                     if (sets[set][way].valid){
-                        cout << "Set: " << set << " Way: " << way << " Tag: " << sets[set][way].tag << " (" << sets[set][way].lru << ")" << endl;
+                        if (sharp)
+                            cout << "Set: " << set << " Way: " << way << " Tag: " << sets[set][way].tag << " (" << sets[set][way].lru << ")"  << "[" << owner[set][way] << "]" << endl;
+                        else
+                            cout << "Set: " << set << " Way: " << way << " Tag: " << sets[set][way].tag << " (" << sets[set][way].lru << ")" << endl;
                     }
                 }
             }
@@ -316,8 +321,16 @@ VOID instr_cache_load(unsigned long ip) {
 
 BOOL data_cache_load(unsigned long addr, int core){
     bool miss;
-    miss = l2_cache->load (addr, core);
-    if (miss) l3_cache->load (addr, core);
+
+    if (core == 0){
+        /* Victim and Attacker0 have a different cache hierarchy for simplicity */
+        miss = l2_cache->load (addr, core);
+        if (miss) l3_cache->load (addr, core);
+    }
+    else {
+        /* TODO: Attackers access L3 cache directly for now */
+        miss = l3_cache->load(addr, core);
+    }
     return miss;
 }
 
@@ -414,6 +427,39 @@ INT32 Usage(){
     return -1;
 }
 
+int main_test_sharp(int argc, char **argv){
+    unsigned int assoc_l2 = 4;
+    unsigned int assoc_l3 = 16;
+    unsigned long set_number_l3 = 16384 * 1024 / LINE_SIZE / assoc_l3;
+    number_cores = 3;
+
+    /* Test our SHARP implementation */
+    l2_cache = new Cache(256, LINE_SIZE, 100, assoc_l2, false);
+    l3_cache = new Cache(16384, LINE_SIZE, 100, assoc_l3, true); // l3 uses SHARP
+
+    /* Initially load <assoc_l3> blocks from core 0 */
+    for (unsigned int i = 0; i < assoc_l3; i++){
+        data_cache_load(LINE_SIZE*set_number_l3*i, 0);
+    }
+
+    cout << "About to load from core 1" << endl;
+    /* Load 1 block from core 1 */
+    data_cache_load(LINE_SIZE*set_number_l3*16, 1);
+    cout << "Loaded" << endl;
+
+    /* L3 cache should have <assoc_l3>-1 blocks from core0 and 1 block from core1 */
+    cout << "L3 cache" << endl; l3_cache->print_contents();
+
+    /* After loading one more block from core 1, the L3 cache should have the same format as before */
+    data_cache_load(LINE_SIZE*set_number_l3*17, 1);
+    cout << "L3 cache" << endl; l3_cache->print_contents();
+
+    /* After loading one block from core 2, the L3 cache should now evict randomly one block */
+    data_cache_load(LINE_SIZE*set_number_l3*18, 2);
+    cout << "L3 cache" << endl; l3_cache->print_contents();
+
+    return 0;
+}
 
 int main_test_caches(int argc, char **argv){
     /* Test new changes to Caches,
@@ -424,9 +470,10 @@ int main_test_caches(int argc, char **argv){
     unsigned int assoc_l2 = 4;
     unsigned int assoc_l3 = 16;
     unsigned long set_number_l2 = 256 * 1024 / LINE_SIZE / assoc_l2;
+    number_cores = 4;
 
     l2_cache = new Cache(256, LINE_SIZE, 100, assoc_l2, false);
-    l3_cache = new Cache(12288, LINE_SIZE, 100, assoc_l3, true); // l3 uses SHARP
+    l3_cache = new Cache(16384, LINE_SIZE, 100, assoc_l3, true); // l3 uses SHARP
     
     //BOOL data_cache_load(unsigned long addr, int core);
 
@@ -454,6 +501,7 @@ int main(int argc, char **argv)
     multi_spy = true;
     shared_l2 = false;
     spy_count = 4;
+    number_cores = 4;
 
     srand(0);
     
@@ -463,9 +511,9 @@ int main(int argc, char **argv)
 
     PIN_Init(argc, argv);
     
-    /* Parameters taken from a real i7 processor */
+    /* Parameters taken from a real i7 processor. L3 cache size is made to be a power of 2 */
     l2_cache = new Cache(256, LINE_SIZE, 100, 4, false);
-    l3_cache = new Cache(12288, LINE_SIZE, 100, 16, true); // l3 uses SHARP
+    l3_cache = new Cache(16384, LINE_SIZE, 100, 16, true); // l3 uses SHARP
     
     
     if (shared_l2) spy_count = 2;
