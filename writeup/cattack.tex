@@ -166,6 +166,10 @@ Then the set of partial keys are combined.
 Since the eviction is random, the chances of at least one of the spies' primes working (right-hand side of Figure~\ref{fig:ms}) for a specific bit in the key become more likely with each additional execution.
 As an aside, case $3$ requires timing between the loads of the $n^{th}$ spy and the other spies, which may be unrealistic for spies acting across several cores.
 
+In this attack, the alarm counter for both the victim and the $n^{th}$ spy would be incremented during the random evictions.
+However, the alarms can be spread across all spies by rotating which spy makes the $n^{th}$ load.
+This rotation can be based on a predefined static schedule, so the spies would not need to communicate.
+
 
 \section{Shared Core Attack}
 
@@ -176,17 +180,57 @@ As an aside, case $3$ requires timing between the loads of the $n^{th}$ spy and 
 \label{fig:ss}
 \end{figure}
 
+The shared core attack relies on the assumption that the CVBs operate using a snoopy protocol.
+This allows a spy on the same core as the victim to invalidate memory at the private L2.
+Figure~\ref{fig:ss} shows an example of this attack, where the L2 is a private cache shared between Spy2 and the victim.
+In this attack Spy1 is tasked with priming the shared L3 cache set and collecting information about the encryption key exponents.
+To do this, Spy1 first primes the cache set with $n$ loads.
+Then Spy1 waits as the victim accesses the exponent bit instruction, bringing that instruction into the L3 and L2.
+After the victim has accessed the instruction, Spy2 fills the L2 set containing the victim's data.
+If the L2 uses an LRU-based protocol, this will evict the victim's data.
+Note that this data should be mapped to a separate cache set in the shared L3.
+It is crucial that at this point the snoopy monitoring invalidates the CVB for the victim's data in the L3.
+Finally, Spy1 reloads $n$ times encountering one miss if the victim has accessed data.
+This miss allows the spy to infer a bit of value $1$, and all hits corresponds to value $0$.
+Importantly, on the miss Spy1 will evict the now inactive victim cache line and once again fill the entire cache set.
+This would not be possible if the victim data was still in the private L2.
 
+This attack benefits from avoiding step $3$ in the SHARP protocol, so no random evictions will occur for the spies.
+In addition, Spy1 will never increment its alarm counter because it never loads more than $n$ independent cache lines.
+On the other hand, the victim will increase its alarm counter with each access to the exponent instruction.
+This inverts the intended affect of the alarm counter.
+For this attack it may be difficult to consistently evict data in the L2 with Spy2.
+Since the processes share the same core it is not clear how thread scheduling and blocking on a cache miss would affect Spy2.
 
+\section{Evaluation}
 
-\section{Implementation}
+We implemented two simulators to model our attacks.
+The first was a high-level simulator built in Python.
+This simulator implements the SHARP protocol and both attacks, along with a representation of the L2 and L3 cache lines in question.
+It abstracts away instructions and timing, meaning the encryption key either has an exponent bit and the victim accesses memory or it does not.
+The square and multiply algorithm is not implemented.
+The spies are also assumed to know the appropriate wait time and recognize cache misses correctly.
 
+This was simply a prototype to quickly evaluate the two attacks under near perfect conditions.
+The tool can be used with the following options:
 
+\begin{itemize}
+\item -s  Cache set size (spawn same number of spies for multiple spies attack)
+\item -k  RSA key exponents, e.g. 011000110
+\item -i  Iterations of RSA key detection
+\item -a 1 for multiple spies attack, 2 for shared core attack
+\end{itemize}
 
-Deterministic python simulation
-- describe results
+We sought to further evaluate the attacks in a more robust simulation framework that included noise.
+To do this we decided to use a pintool.
+This was the best option, as the simulators used in~\cite{sharp,howSharp} had poor documentation and the authors of SHARP were unable to give us their source code.
+Pintool does not have support for inserting analysis code into multiple executable files are running them on multiple cores simultaneously. 
+To get around this, we used the victim program~\footnote{RSA implementation found at \\\url{https://gist.github.com/Thelouras58/a3b04a3df0d167743084ff94442f52d8}} as the executable.
+The spies, cache hierarchy, SHARP protocol, and global timing were implemented in the pintool itself.
 
-PinTool modification
+Describe Implementation 
+
+Describe Resulsts
 
 \section{Conclusion and Future Work}
 
@@ -201,7 +245,7 @@ In the project proposal $75\%$ was to implement SHARP in a simulated environment
 We feel we landed comfortably in the $100\%$ range.
 We were very happy with the two attacks we came up with, and decided to spend more time on them than implementing SHARP in a more sophisticated simulator.
 The largest setback was realizing the simulators used in the relevant papers~\cite{sharp,howSharp} had little developer support.
-In addition, we reached out to the author of SHARP but they were not able to share the source code they used for experimentation.
+We reached out to the author of SHARP but they were not able to share the source code they used for experimentation.
 As such, we opted for a solution that hacked spies into pintool.
 It added some noise, taking the experimentation a level above the deterministic simulator we implemented in Python.
 
