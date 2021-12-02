@@ -625,9 +625,13 @@ void print_combined_key () {
     }
     else{
         cout << "Key: ";
-        for (unsigned int i = 4; i < spies[1]->hits.size(); i+= 2){
+        for (unsigned int i = 4; i < spies[1]->hits.size() - 1; i+= 2){
             if (spies[1]->hits[i] && !spies[1]->hits[i+1])
                 cout << "1";
+            else if ((spies[1]->hits[i+1])){
+                cout << "?";
+                i += 1;
+            }
             else
                 cout << "0";
         }
