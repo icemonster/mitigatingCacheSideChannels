@@ -43,7 +43,6 @@ class Cache {
 
         Way **sets;
     
-        // J
         // SHARP data
         bool sharp;
         unsigned long * alarm_counter;
@@ -120,12 +119,12 @@ class Cache {
         }
 
         void swap(unsigned long *lrus, unsigned long *ways, int index1, int index2){
-            unsigned long temp1 = lrus[index1];
-            unsigned long temp2 = ways[index1];
+            unsigned long lru_temp = lrus[index1];
+            unsigned long way_temp = ways[index1];
             lrus[index1] = lrus[index2];
+            lrus[index2] = lru_temp;
             ways[index1] = ways[index2];
-            lrus[index2] = temp1;
-            ways[index2] = temp2;
+            ways[index2] = way_temp;
         }
 
         void sort_lru_list(unsigned long *ways, unsigned long set){
@@ -137,7 +136,7 @@ class Cache {
                 lrus[way] = sets[set][way].lru;
             }
 
-            /* I mean, max associativity is not that high, we can do bubble sort */
+            /* I mean, max associativity is not usually high, we can do bubble sort */
             for(unsigned int i = 0; i < associativity-1; i++){
                 for (unsigned j = 0; j < associativity - i - 1; j++){
                     if (lrus[j] > lrus[j+1]){
@@ -149,20 +148,23 @@ class Cache {
         }
 
         void evict_lru_block(unsigned long set, unsigned long addr){
+            /* Usual eviction policy */
             Way *ways = sets[set];
 
             unsigned long ways_list[associativity];
             sort_lru_list(ways_list, set);
 
+            /* Just get the way with the minimum LRU value */
             unsigned int way = ways_list[0];
             ways[way].valid = true;
             ways[way].tag = addr & tag_mask;
 
+            /* Update LRU to be maximum LRU +1 */
             ways[way].lru = ways[ways_list[associativity-1]].lru + 1;
         }
     
-        // J
         void evict_sharp_block (unsigned long set, unsigned long addr, int core) {
+            /* Sharp's eviction policy */
             Way *ways = sets[set];
 
             unsigned long ways_list[associativity];
@@ -183,6 +185,7 @@ class Cache {
             if (candidate > -1) {
                 ways[candidate].valid = true;
                 ways[candidate].tag = addr & tag_mask;
+                ways[candidate].lru = ways[ways_list[associativity-1]].lru + 1;
                 owner[set][candidate] = core;
                 return;
             }
@@ -198,6 +201,7 @@ class Cache {
             if (candidate > -1) {
                 ways[candidate].valid = true;
                 ways[candidate].tag = addr & tag_mask;
+                ways[candidate].lru = ways[ways_list[associativity-1]].lru + 1;
                 owner[set][candidate] = core;
                 return;
             }
@@ -207,13 +211,14 @@ class Cache {
 
             ways[candidate].valid = true;
             ways[candidate].tag = addr & tag_mask;
+            ways[candidate].lru = ways[ways_list[associativity-1]].lru + 1;
             owner[set][candidate] = core;
-            alarm_counter[core]++; // update alarm counter
+            alarm_counter[core]++; // Update alarm counter
             return;
   
         }
 
-        bool access(unsigned long addr, bool is_load, int core){
+        bool load(unsigned long addr, int core){
             accesses++;
             
             unsigned long set = get_set_index(addr);
@@ -230,14 +235,8 @@ class Cache {
             return is_miss;
         }
 
-        bool store(unsigned long addr, int core){
-            return access(addr, false, core);
-        }
-        bool load(unsigned long addr, int core){
-            return access(addr, true, core);
-        }
-
         void print_contents(){
+            /* Just a debug function. Dont mind me */
             unsigned long set_number = size * 1024 / line_size / associativity;
             for (unsigned long set = 0; set < set_number; set++){
                 for (unsigned int way = 0; way < associativity; way++){
@@ -254,7 +253,6 @@ class Cache {
 
 BOOL data_cache_load(unsigned long addr, int core);
 
-// J
 class Spy {
 public:
     
@@ -269,12 +267,13 @@ public:
         cnt = 0;
         ready = 0;
         wait_time = 30; //?
-        spy_id = id;
+        spy_id = id; /* Also represents the core it is located in */
         if (spy_id == 0 and shared_l2) shared = true;
         else shared = false;
     }
     
     void operate () {
+        /* Described as a state machine depending on the value of cnt */
         cnt += 1;
         if (cnt == 1) { // initial configuration
             if (shared) {} // attack 2
@@ -289,10 +288,10 @@ public:
             else { // attack 1
                 // call load and check if hit
                 /*
-                    TODO: Choose good address and core
+                    TODO: Choose good address
                     TODO: How to check if it is a hit
                 */
-                bool hit = data_cache_load(0x0, 0);
+                bool hit = data_cache_load(0x0, spy_id);
                 hits.push_back(hit);
                 
                 // update wait time
@@ -312,7 +311,8 @@ Spy ** spies;
 
 VOID instr_cache_load(unsigned long ip) {
     /*
-        TODO:   Pass the core argument correctly
+        Only the victim causes instruction loads for simplicity
+            And it is assumed to be always located on core 0
     */
     bool miss;
     miss = l2_cache->load (ip, 0);
@@ -375,7 +375,11 @@ VOID Instruction(INS ins, VOID *v)
     }
     
     
-    // J - random values computed statically here
+    /* 
+        Random values computed statically here. 
+            Faster than dynamically call rand every victim instruction
+            Still introduces a significant amount of noise
+    */
     for (int i = 0; i < spy_count; i++) {
         if (rand() % 100 <= spy_probability) { // chance of spy instruction
             INS_InsertPredicatedCall(
@@ -388,8 +392,10 @@ VOID Instruction(INS ins, VOID *v)
     
 }
 
-// J
 void print_combined_key () {
+    /* Computing the private key using information gathered 
+        by all the spies AFTER the victim finishes executing.
+            We do not need communication between spies during execution */
     if (multi_spy) {
         // combine hits from spies
         vector<int> combined_key;
@@ -411,31 +417,38 @@ void print_combined_key () {
             combined_key.push_back (out);
         }
         cout << "Combined Key: ";
-        for (unsigned int i = 0; i < combined_key.size(); i++) cout << combined_key[i] << " ";
+        for (unsigned int i = 0; i < combined_key.size(); i++) cout << combined_key[i];
         cout << endl;
     }
 }
 
 VOID Fini(INT32 code, VOID *v)
 {
+    cout << "Overall stats: " << endl;
+    for (unsigned int i = 0; i < number_cores; i++){
+        printf("Alarm for core %d: %ld\n", i, l3_cache->alarm_counter[i]);
+    }
+
+    cout << "L3 overall misses: " << l3_cache->misses << " and accesses: " << l3_cache->accesses << endl;
+
     print_combined_key();
 }
 
 INT32 Usage(){
     cerr << "Our cache simulator tool." << endl;
-    cerr << "Usage: pin -t obj-intel64/pin_sharp_cache.so -- cache_test/MMM.out " << endl;
+    cerr << "Usage: pin -t obj-intel64/pin_sharp_cache.so -- ./rsa " << endl;
     return -1;
 }
 
-int main_test_sharp(int argc, char **argv){
+void test_sharp(){
     unsigned int assoc_l2 = 4;
     unsigned int assoc_l3 = 16;
     unsigned long set_number_l3 = 16384 * 1024 / LINE_SIZE / assoc_l3;
     number_cores = 3;
 
     /* Test our SHARP implementation */
-    l2_cache = new Cache(256, LINE_SIZE, 100, assoc_l2, false);
-    l3_cache = new Cache(16384, LINE_SIZE, 100, assoc_l3, true); // l3 uses SHARP
+    l2_cache = new Cache(256, LINE_SIZE, 12, assoc_l2, false);
+    l3_cache = new Cache(16384, LINE_SIZE, 36, assoc_l3, true); // l3 uses SHARP
 
     /* Initially load <assoc_l3> blocks from core 0 */
     for (unsigned int i = 0; i < assoc_l3; i++){
@@ -457,11 +470,9 @@ int main_test_sharp(int argc, char **argv){
     /* After loading one block from core 2, the L3 cache should now evict randomly one block */
     data_cache_load(LINE_SIZE*set_number_l3*18, 2);
     cout << "L3 cache" << endl; l3_cache->print_contents();
-
-    return 0;
 }
 
-int main_test_caches(int argc, char **argv){
+void test_caches(){
     /* Test new changes to Caches,
          considering associativity could be larger than 2, 
          and we now load from multiple caches
@@ -472,8 +483,8 @@ int main_test_caches(int argc, char **argv){
     unsigned long set_number_l2 = 256 * 1024 / LINE_SIZE / assoc_l2;
     number_cores = 4;
 
-    l2_cache = new Cache(256, LINE_SIZE, 100, assoc_l2, false);
-    l3_cache = new Cache(16384, LINE_SIZE, 100, assoc_l3, true); // l3 uses SHARP
+    l2_cache = new Cache(256, LINE_SIZE, 12, assoc_l2, false);
+    l3_cache = new Cache(16384, LINE_SIZE, 36, assoc_l3, true); // l3 uses SHARP
     
     //BOOL data_cache_load(unsigned long addr, int core);
 
@@ -489,34 +500,38 @@ int main_test_caches(int argc, char **argv){
     cout << "Loaded 4 colliding addresses" << endl;
     cout << "L2 cache" << endl; l2_cache->print_contents();
     cout << "L3 cache" << endl; l3_cache->print_contents();
-
-    return 0;
 }
 
 int main(int argc, char **argv)
 {
+    /* Finish comment in this line for testing 
+    test_sharp();
+    test_caches();
+    return 0;
+    // */
     spy_probability = 90; // chances a spy will insert an instruction
     
     // select attack
     multi_spy = true;
     shared_l2 = false;
-    spy_count = 4;
     number_cores = 4;
+    if (shared_l2) spy_count = 2;
+    else           spy_count = 4;
 
-    srand(0);
+    srand(0); /* Make stuff deterministic for easier debugging */
     
-    /*if (argc < 11){
+    /*if (argc < 7+4){
         return Usage();
     }*/
 
     PIN_Init(argc, argv);
     
-    /* Parameters taken from a real i7 processor. L3 cache size is made to be a power of 2 */
-    l2_cache = new Cache(256, LINE_SIZE, 100, 4, false);
-    l3_cache = new Cache(16384, LINE_SIZE, 100, 16, true); // l3 uses SHARP
+    /* Parameters taken from a real i7 processor (3.4 GHz i7-4770). L3 cache size is made to be a power of 2 */
+    l2_cache = new Cache(256, LINE_SIZE, 12, 4, false);
+    l3_cache = new Cache(16384, LINE_SIZE, 36, 16, true); // l3 uses SHARP
     
     
-    if (shared_l2) spy_count = 2;
+
     spies = (Spy**) malloc (sizeof (Spy *) * spy_count);
     if (shared_l2) {
         spies[0] = new Spy (0); // shares L2
