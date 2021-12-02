@@ -11,8 +11,13 @@
 #define L2_ASSOC 4
 #define L3_ASSOC 16
 
+#define L2_CACHE_MISS_PENALTY 40
+#define L3_CACHE_MISS_PENALTY 120
+
 /* Assuming 1 cycle per instruction */
 #define CPI 1
+#define CACHE_NOISE_ENABLED false /* Much slower if enabled because each cache load calls rand() */
+#define CACHE_NOISE 10 // Maximum noise in cycles introduced by the cache. times will vary between -CACHE_NOISE/2 and CACHE_NOISE/2
 
 /*  SHARP, end of section 7.3, "Hence, we recommend to use SHARP4 and use a threshold of 2,000 alarm events in 1 billion cycles" */
 #define SHARP_ALARM_TIME_THRESHOLD 1000000000
@@ -271,7 +276,7 @@ class Cache {
             bool is_miss = find_tag_in_set(set, addr);
 
             result->miss = is_miss;
-            result->penalty = 1;
+            result->penalty = CACHE_NOISE/2+1;
             result->evicted = false;
             result->evicted_addr = 0;
             result->evicted_core = 0;
@@ -313,6 +318,7 @@ unsigned long load(unsigned long addr, int core){
 
     CacheAnswer l2_answer;
     CacheAnswer l3_answer;
+    unsigned long penalty;
 
     /* Addresses must be aligned to 16 bits */
     if (aligned_addr(addr)){
@@ -362,7 +368,7 @@ unsigned long load(unsigned long addr, int core){
         if (l3_answer.evicted){
             if (l3_answer.evicted_core == 0){
                 /* Evict from L2 cache from the proper core
-                        TODO: As soon as attackers start having an L2 as well, I also have to consider them
+                        TODO: As soon as attackers start having an L2 as well, we also have to consider them
                 */
 
                 unsigned long addr = l3_answer.evicted_addr;
@@ -380,16 +386,20 @@ unsigned long load(unsigned long addr, int core){
 
     if (core == 0){
         if (l2_answer.miss){
-            return l3_answer.penalty;
+            penalty = l3_answer.penalty;
         }
         else{
-            return l2_answer.penalty;
+            penalty = l2_answer.penalty;
         }
     }
     else{
-        return l3_answer.penalty;
+        penalty = l3_answer.penalty;
     }
-    
+
+    if (CACHE_NOISE_ENABLED)
+        return penalty + (rand() % CACHE_NOISE) - CACHE_NOISE/2;
+    else
+        return penalty;
 }
 
 class Spy {
@@ -461,7 +471,7 @@ public:
                     if (iteration_started == false){
                         for (unsigned int i = 1; i < L3_ASSOC+1; i++){
                             time_to_wait = load(square_addr + LINE_SIZE*set_number_l3*i, spy_id);
-                            if (time_to_wait >= 36){ // Cheating for now
+                            if (time_to_wait >= L3_CACHE_MISS_PENALTY - CACHE_NOISE/4){
                                 iteration_started = true;
                                 cout << "Leaked that iteration started " << endl;
                             }
@@ -472,7 +482,7 @@ public:
                         bool exponent_is_1 = false;
                         for (unsigned int i = 1; i < L3_ASSOC+1; i++){
                             time_to_wait = load(multiply_addr + LINE_SIZE*set_number_l3*i, spy_id);
-                            if (time_to_wait >= 36){ // Cheating for now
+                            if (time_to_wait >= L3_CACHE_MISS_PENALTY - CACHE_NOISE/4){
                                 exponent_is_1 = true;
                             }
                         }
@@ -625,12 +635,12 @@ void print_combined_key () {
     }
     else{
         cout << "Key: ";
-        for (unsigned int i = 4; i < spies[1]->hits.size() - 1; i+= 2){
+        for (unsigned int i = 4; i < spies[1]->hits.size() - 2; i+= 2){
             if (spies[1]->hits[i] && !spies[1]->hits[i+1])
                 cout << "1";
             else if ((spies[1]->hits[i+1])){
                 cout << "?";
-                i += 1;
+                i -= 1;
             }
             else
                 cout << "0";
@@ -659,7 +669,8 @@ INT32 Usage(){
 }
 
 void test_second_atk_simplified(){
-    /* Test technique used in our second attack. */
+    /* Test technique used in our second attack.
+        Test this with 0 cache noise */
     unsigned long set_number_l2 = 256 * 1024 / LINE_SIZE / L2_ASSOC;
     unsigned long set_number_l3 = 16384 * 1024 / LINE_SIZE / L3_ASSOC;
 
@@ -667,8 +678,8 @@ void test_second_atk_simplified(){
     square_addr = 0x401697;
     multiply_addr = 0x4016dc;
 
-    l2_cache = new Cache(256, LINE_SIZE, 12, L2_ASSOC, false);
-    l3_cache = new Cache(16384, LINE_SIZE, 36, L3_ASSOC, true); // l3 uses SHARP
+    l2_cache = new Cache(256, LINE_SIZE, L2_CACHE_MISS_PENALTY, L2_ASSOC, false);
+    l3_cache = new Cache(16384, LINE_SIZE, L3_CACHE_MISS_PENALTY, L3_ASSOC, true); // l3 uses SHARP
     
     for (unsigned int i = 1; i < L3_ASSOC+1; i++){
         load(square_addr + LINE_SIZE*set_number_l3*i, 1);
@@ -680,7 +691,7 @@ void test_second_atk_simplified(){
 
     for (unsigned int i = 1; i < L3_ASSOC+1; i++){
         unsigned long time_to_wait = load(square_addr + LINE_SIZE*set_number_l3*i, 1);
-        if (time_to_wait >= 36){
+        if (time_to_wait >= L3_CACHE_MISS_PENALTY){
             cout << "This should not be printed" << endl;
             break;
         }
@@ -702,14 +713,14 @@ void test_second_atk_simplified(){
 
     for (unsigned int i = 1; i < L3_ASSOC+1; i++){
         unsigned long time_to_wait = load(square_addr + LINE_SIZE*set_number_l3*i, 1);
-        if (time_to_wait >= 36){
+        if (time_to_wait >= L3_CACHE_MISS_PENALTY){
             cout << "This should be printed" << endl;
         }
     }
 
     for (unsigned int i = 1; i < L3_ASSOC+1; i++){
         unsigned long time_to_wait = load(square_addr + LINE_SIZE*set_number_l3*i, 1);
-        if (time_to_wait >= 36){
+        if (time_to_wait >= L3_CACHE_MISS_PENALTY){
             cout << "This should not be printed" << endl;
         }
     }
@@ -721,7 +732,7 @@ void test_second_atk_simplified(){
 
     for (unsigned int i = 1; i < L3_ASSOC+1; i++){
         unsigned long time_to_wait = load(square_addr + LINE_SIZE*set_number_l3*i, 1);
-        if (time_to_wait >= 36){
+        if (time_to_wait >= L3_CACHE_MISS_PENALTY){
             cout << "This should not be printed" << endl;
         }
     }
@@ -738,7 +749,7 @@ void test_second_atk_simplified(){
 
     for (unsigned int i = 1; i < L3_ASSOC+1; i++){
         unsigned long time_to_wait = load(square_addr + LINE_SIZE*set_number_l3*i, 1);
-        if (time_to_wait >= 36){
+        if (time_to_wait >= L3_CACHE_MISS_PENALTY){
             cout << "This should not be printed" << endl;
         }
     }
@@ -759,7 +770,7 @@ void test_second_atk_simplified(){
 
     for (unsigned int i = 1; i < L3_ASSOC+1; i++){
         unsigned long time_to_wait = load(square_addr + LINE_SIZE*set_number_l3*i, 1);
-        if (time_to_wait >= 36){
+        if (time_to_wait >= L3_CACHE_MISS_PENALTY){
             cout << "This should be printed" << endl;
         }
     }
@@ -773,8 +784,8 @@ void test_evict_and_ownership(){
 
     number_cores = 17;
 
-    l2_cache = new Cache(256, LINE_SIZE, 12, L2_ASSOC, false);
-    l3_cache = new Cache(16384, LINE_SIZE, 36, L3_ASSOC, true); // l3 uses SHARP
+    l2_cache = new Cache(256, LINE_SIZE, L2_CACHE_MISS_PENALTY, L2_ASSOC, false);
+    l3_cache = new Cache(16384, LINE_SIZE, L3_CACHE_MISS_PENALTY, L3_ASSOC, true); // l3 uses SHARP
 
     /* Initially load <L2_ASSOC> blocks from core 0 */
     for (unsigned int i = 0; i < L2_ASSOC; i++){
@@ -811,8 +822,8 @@ void test_sharp(){
     unsigned long set_number_l3 = 16384 * 1024 / LINE_SIZE / L3_ASSOC;
     number_cores = 3;
 
-    l2_cache = new Cache(256, LINE_SIZE, 12, L2_ASSOC, false);
-    l3_cache = new Cache(16384, LINE_SIZE, 36, L3_ASSOC, true); // l3 uses SHARP
+    l2_cache = new Cache(256, LINE_SIZE, L2_CACHE_MISS_PENALTY, L2_ASSOC, false);
+    l3_cache = new Cache(16384, LINE_SIZE, L3_CACHE_MISS_PENALTY, L3_ASSOC, true); // l3 uses SHARP
 
     /* Initially load <L3_ASSOC> blocks from core 0 */
     for (unsigned int i = 0; i < L3_ASSOC; i++){
@@ -844,8 +855,8 @@ void test_caches(){
     unsigned long set_number_l2 = 256 * 1024 / LINE_SIZE / L2_ASSOC;
     number_cores = 4;
 
-    l2_cache = new Cache(256, LINE_SIZE, 12, L2_ASSOC, false);
-    l3_cache = new Cache(16384, LINE_SIZE, 36, L3_ASSOC, true); // l3 uses SHARP
+    l2_cache = new Cache(256, LINE_SIZE, L2_CACHE_MISS_PENALTY, L2_ASSOC, false);
+    l3_cache = new Cache(16384, LINE_SIZE, L3_CACHE_MISS_PENALTY, L3_ASSOC, true); // l3 uses SHARP
 
     load(0, 0);
     load(LINE_SIZE*set_number_l2, 0);
@@ -900,8 +911,8 @@ int main(int argc, char **argv)
     PIN_Init(argc, argv);
     
     /* Parameters taken from a real i7 processor (3.4 GHz i7-4770). L3 cache size is made to be a power of 2 */
-    l2_cache = new Cache(256, LINE_SIZE, 12, L2_ASSOC, false);
-    l3_cache = new Cache(16384, LINE_SIZE, 36, L3_ASSOC, true); // l3 uses SHARP
+    l2_cache = new Cache(256, LINE_SIZE, L2_CACHE_MISS_PENALTY, L2_ASSOC, false);
+    l3_cache = new Cache(16384, LINE_SIZE, L3_CACHE_MISS_PENALTY, L3_ASSOC, true); // l3 uses SHARP
     
     
 
