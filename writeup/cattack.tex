@@ -7,6 +7,7 @@
 \usepackage{mathpartir}
 \usepackage{booktabs}
 \usepackage{verbatim}
+\usepackage{hyperref}
 \usepackage[margin=1in,a4paper]{geometry}
 \makeatletter
 \newcommand{\@chapapp}{\relax}%
@@ -24,8 +25,8 @@
 
 
 
-\title{Attacking SHARP with Cache Side-Channel Attacks\\Using Multiple Spies}
-\author{Joseph Reeves, Nuno Sabino}
+\title{Attacking SHARP through Cache Side-Channels\\with Multiple Spies}
+\author{Joseph Reeves and Nuno Sabino}
 %\institute{Carnegie Mellon University, Pittsburgh, Pennsylvania, United States}
 
 
@@ -36,39 +37,151 @@
 
 \section{Introduction}
 
-\begin{itemize}
+Modern computer architectures support parallelism at multiple levels, providing many cores that can each interleave many threads.
+The parallel execution of independent processes relies on shared hardware to maintain efficiency.
+While a malignant program cannot directly observe the instructions executed by other programs,
+it can take advantage of shared hardware to learn information indirectly.
+In this work we focus on attacks that leverage eviction protocols in a shared L3 cache to learn when certain instructions are used by another process.
 
-\item Cache hierarchy and shared hardware
+\begin{figure}[h]
+\centering
+\includegraphics[scale=0.9]{../presentation/sqm.png}
+\caption{Square multiply algorithm. Image from the SHARP paper~\cite{sharp}.}
+\label{fig:sm}
+\end{figure}
 
-\item square and multiply for RSA
+As an example, take the square and multiply algorithm~\cite{exp} used to compute encrypted messages for RSA encryption.
+The program executing the algorithm in Figure~\ref{fig:sm}, which we will call the {\it victim}, will execute line $6$ only when there is an exponent in the encryption key. 
+Further, the victim will execute line $3$ after each iteration.
+Note that the time between iterations is large because the instructions are often operating over long messages.
+If a malignant process, which we will call the {\it spy}, knows when the victim executes lines $3$ and $6$, it can recover the encryption key used by the victim.
 
-\item Side-channel attacks (prime and probe)
+Many styles of cache side-channel attack to recover the encryption key have been researched, including {\it flush and reload}, {\it evict and reload}, {\it prime and probe}, etc. 
+We will focus on prime and probe attacks, with an example shown in Figure~\ref{fig:pp}.
+This attack assumes the victim and spy are running on different cores but share an L3 cache.
+In addition, the spy must know which cache set instruction $3$ from the square and multiply algorithm is mapped to.
+The attack begins with the spy priming the cache set through several load instructions.
+In step $1$ the spy makes four loads to fill up the cache set with an associativity of four.
+Then the victim may load instruction $3$ (represented as the green dot) into memory if there is an exponent in the encryption key.
+During step $2$ the spy waits.
+At step $3$ the spy reloads all four memory addresses, and if there is a miss the spy assumes the victim had an exponent bit.
+Alternatively, if the victim did not have an exponent bit the spy should have all hits.
+Ideally, the spy could run this attack on multiple uses of the victim's encryption key and combine the information found at each iteration.
+This is important because the process is inherently noisy and other cores may be accessing memory in the same L3 cache set.
+However, there are ways to extract a full encryption key from a partial key~\cite{partKey}.
 
-\item considerations - timing, knowledge of locations, repetition, coarse-grained miss time windows
+A real-world implementation of this attack requires several pieces of information that can be found through experimentation.
+The address of the desired instruction in memory and the wait time of the spy in step $2$ can be determined emperically~\cite{waitTime}.
+Additionally, an L3 cache miss can be inferred by finding average L1, L2, and L3 miss times,
+assuming there is a significant and measurable difference between L3 misses and the rest of the cache.
+We do not focus on these platform specific numbers, and instead model our attacks at a high-level with these assumptions baked in.
 
-\item Sharp, 2 attacks, implementation, results
+\begin{figure}[t]
+\centering
+\includegraphics[scale=0.8]{../presentation/cattack.png}
+\caption{Example of a prime and probe attack at the level three shared cache with a set size of four.}
+\label{fig:pp}
+\end{figure}
 
-\end{itemize}
+The {\it SHARP}~\cite{sharp} protocol presents one way of mitigating cache side-channel attacks by modifying the eviction policy for the shared L3.
+Our project involved implementing high-level simulations of the SHARP protocol, 
+then deploying two styles of prime and probe attacks that bypassed the protocol.
+One attack uses multiple spies on multiple cores ({\it Multiple Spies}) and the other uses spies sharing the victims core ({\it Shared Core}).
+We ran experiments on a deterministic python simulator as a proof of concept.
+We then constructed a pintool to show that our attacks work when some noise is added to the experiment.
 
-wait time for spy~\cite{waitTime}
-
-square and multiple algorithm~\cite{exp}
-
-need only partial key to determine entire key~\cite{partKey}
 
 \section{SHARP}
 
-{\it SHARP}~\cite{sharp}
+The Secure Hierarchy-Aware cache Replacement Policy (SHARP) is a cache eviction policy set at a shared L3 cache designed to mitigate cache side-chanel attacks~\cite{sharp}.
+The general idea of SHARP is to prevent {\it inclusion victims}.
+An inclusion victim is created when data evicted in the shared L3 is active in a core's private L2 cache.
+That data must then be evicted from the private L2 to preserve inclusivity.
+Preventing inclusion victims should mitigate attacks of the sort in Figure~\ref{fig:pp} because the attack relies on the prime step which evicts the victims instruction from memory.
+This would cause an inclusion victim and be prevented.
+So, when the spy tries to prime the reload its four pieces of data into the shared L3,
+it will not be able to fill the cache sit and evict the victim.
 
-paper pointing out holes in SHARP~\cite{howSharp}
+It is infeasible to prevent inclusion victims in every case, e.g., a cache set may contain cache lines that all create inclusion victims if evicted leading to a deadlock scenario.
+Therefore, the SHARP design provides a multi-step process for implementing the eviction policy when a core accesses memory:
+
+\begin{enumerate}
+
+\item If the cache set contains an unused cache line use it. Otherwise go to $2$.
+\item If the cache set contains a cache line owned by the calling core, evict the cache line owned by the calling core based on the existing replacement policy ordering. Otherwise go to $3$.
+\item Evict some cache line at random and increment the alarm counter for the calling core.
+
+\end{enumerate}
+
+The alarm counter helps identify when a core is causing frequent random evictions in step $3$.
+This information can be used by the operating system to investigate processes running on a certain core.
+Core Valid Bits (CVBs) are used to determine when a cache line is owned by a core, i.e., the data is active in the core's private L2 cache.
+SHARP describes three methods for maintaining the CVBs, involving lazy updates or snoopy monitoring.
+In our implementation, we assume the CVBs are accurate under a snoopy protocol, meaning the CVB is set iff the data is active in the core's L2 cache. 
+This is an important assumption for the shared core attack.
+
+Since the SHARP paper was published in 2017, there has been research into problems with the protocol~\cite{howSharp}.
+This work shows how the replacement policy can be exploited with denial of service attacks.
+The attacker owns many cache lines and constantly forces the victim into the step $3$ random eviction.
+It also investigates how useful the alarm counter is in detecting spies, and how the coarse-grained alarm counter lacks information on the thread level.
+The paper also described a prime and probe attack to bypass SHARP, but the details are insufficient for replication.
+
+We propose two attacks that bypass SHARP.
+The first attack uses multiple spies each accessing a single cache line in the shared L3.
+This takes advantage of the random eviction in step $3$ of the protocol.
+The second attack uses a spy on the same core of the victim to invalidate the victim's data in the private L2 cache.
+This takes advantage of the snoopy CVB monitoring, allowing a second spy to complete the basic prime and probe attack.
 
 \section{Multiple Spy Attack}
 
+\begin{figure}[h]
+\centering
+\includegraphics[scale=0.9]{../presentation/shared.png}
+\caption{Example of a multiple spy attack at the level three shared cache with a set size of four.}
+\label{fig:ms}
+\end{figure}
+
+The multiple spy attack takes advantage of the random eviction in step $3$ of SHARP by placing spies on $n$ cores assuming the associativity of the L3 cache is $n$.
+Figure~\ref{fig:ms} shows the basic setup for the attack.
+Assuming the victim has active data in the L3, $n-1$ spies will load independent data into a single cache line.
+Then the $n^{th}$ spy loads data with a $\frac{1}{n}$ chance of evicting the victim (shown by the $25\%$ case in the example).
+The spies then wait for some time and all reload their data, recording any misses at the L3 cache.
+It is important that the $n^{th}$ spy reload its data first, as this allows more information to be gained.
+The exponent bit can be inferred in the following cases for each iteration:
+
+\begin{enumerate}
+
+\item The exponent bit is $0$ if all spies have cache hits. This means the victim never put data into the cache set.
+\item The exponent bit is $1$ if all spies had cache hits in the previous iteration and some spies have cache misses in the current iteration. This means the victim may have put data into the cache set causing a cache miss.
+\item The exponent bit is $1$ if the $n^{th}$ spy which loads first after the victim has a cache miss. The $n^{th}$ spy was the last to load during the prime stage, so no other spy could have evicted its data. This means the victim may have evicted it. This happens with probability $\frac{1}{n}$ as the victim would evict some spy at random.
+\item Otherwise, the exponent bit is unknown (we represent this a $-1$ in our simulations).
+
+\end{enumerate}
+
+Of course, for case $2$ and $3$ it may be another program that puts data into the cache set.
+Additionally, the chances that you can learn information are slightly better than $\frac{1}{n}$ (due to the order of spy loads).
+So, there will be many $-1$'s in the recovered key, and potentially some $1$'s that are incorrectly labelled. 
+We account for this by running the attack over many encryption executions.
+Then the set of partial keys are combined.
+Since the eviction is random, the chances of at least one of the spies' primes working (right-hand side of Figure~\ref{fig:ms}) for a specific bit in the key become more likely with each additional execution.
+As an aside, case $3$ requires timing between the loads of the $n^{th}$ spy and the other spies, which may be unrealistic for spies acting across several cores.
 
 
 \section{Shared Core Attack}
 
+\begin{figure}[h]
+\centering
+\includegraphics[scale=0.5]{../presentation/snd_atk.png}
+\caption{Example of a shared core attack at the level two private and level three shared cache with a set size of four.}
+\label{fig:ss}
+\end{figure}
+
+
+
+
 \section{Implementation}
+
+
 
 Deterministic python simulation
 - describe results
@@ -77,108 +190,23 @@ PinTool modification
 
 \section{Conclusion and Future Work}
 
+In this work we implemented the SHARP protocol for a high-level deterministic simulator and also as a pintool.
+We implemented two cache side-channel attacks that recover the bits of an encryption key for the RSA algorithm.
+The experimentation shows a proof-of-concept for the attacks, with some level of noise added to the pintool.
+To make the attacks more enticing, it would be important to implement them on a multi-core cycle-level simulator.
+This would add more noise to the system and bring the attacks closer to real-world implementation.
+This requires significant additional work, including empirically determining spy wait times, instruction addresses in the shared L3, and L2/L3 approximate miss times.
 
-\iffalse
-\begin{figure}[t!]
-\centering
-\begin{tikzpicture}[scale=0.9]
+In the project proposal $75\%$ was to implement SHARP in a simulated environment and evaluate the protocol, $100\%$ was to design attacks to bypass SHARP, and $125\%$ involved evaluating more mitigation techniques beyond SHARP. 
+We feel we landed comfortably in the $100\%$ range.
+We were very happy with the two attacks we came up with, and decided to spend more time on them than implementing SHARP in a more sophisticated simulator.
+The largest setback was realizing the simulators used in the relevant papers~\cite{sharp,howSharp} had little developer support.
+In addition, we reached out to the author of SHARP but they were not able to share the source code they used for experimentation.
+As such, we opted for a solution that hacked spies into pintool.
+It added some noise, taking the experimentation a level above the deterministic simulator we implemented in Python.
 
-%\node at (-2,0) [rectangle,draw] (pre) {Delta-Debugging Image};
+Source code can be found at\\ \url{https://github.com/icemonster/mitigatingCacheSideChannels}.
 
-\draw [thick, fill=cyan] (0,0) -- (2,1) -- (2,-1) -- (0,0);
-\draw [fill=red] (2,0) circle [radius=0.1];
-
-\draw [fill=green] (0,0) circle [radius=0.1];
-
-\node at (0,1) [rectangle]  (st) {Start};
-\node at (3,1) [rectangle]  (cf) {Conflict};
-
-\node at (1,0) [rectangle, green]  {\ding{51}};
-
-\draw  (st) -- (0,0);
-\draw (cf) -- (2,0);
-
-
-\node at (1,-2) [rectangle]  {Proof};
-
-\draw [thick, fill=cyan] (4,0) -- (6,1) -- (6,-1) -- (4,0);
-
-\draw [thick, fill=gray]  (4.5,0.25) -- (6,0.25) -- (6,1) -- (4.5,0.25);
-\draw [thick] (4,0.25) -- (6.5,0.25);
-
-\draw [fill=red] (6,0) circle [radius=0.1];
-
-\draw [fill=green] (4,0) circle [radius=0.1];
-
-\node at (5,-0.1) [rectangle, green]  {\ding{51}};
-
-
-
-
-\draw [thick, fill=cyan] (7,0) -- (9,1) -- (9,-1) -- (7,0);
-
-\draw [thick, fill=gray]  (7.5,0.25) -- (9,0.25) -- (9,1) -- (7.5,0.25);
-\draw [thick] (7,0.25) -- (9.5,0.25);
-
-\draw [thick, fill=gray]  (8,-0.5) -- (9,-0.25) -- (9,-1) -- (8,-0.5);
-\draw [thick] (7,-0.75) -- (9.5,-.125);
-
-\draw [fill=red] (9,0) circle [radius=0.1];
-
-\draw [fill=green] (7,0) circle [radius=0.1];
-
-\node at (8,-0.1) [rectangle, green]  {\ding{51}};
-
-
-\node at (7,-2) [rectangle]  {Coarse-grained reduction};
-
-
-\draw [thick, fill=cyan] (11,0) -- (13,1) -- (13,-1) -- (11,0);
-
-\draw [thick, fill=gray]  (11.5,0.25) -- (13,0.25) -- (13,1) -- (11.5,0.25);
-\draw [thick] (11,0.25) -- (13.5,0.25);
-
-\draw [thick, fill=gray]  (12,-0.5) -- (13,-0.25) -- (13,-1) -- (12,-0.5);
-\draw [thick] (11,-0.75) -- (13.5,-.125);
-
-\draw [thick, fill=gray]  (11.5,0) -- (11.75,0) -- (11.75,-0.25) -- (11.5,-0.25 ) -- (11.5,0) ;
-
-\draw [fill=red] (13,0) circle [radius=0.1];
-
-\draw [fill=green] (11,0) circle [radius=0.1];
-
-\node at (12.2,-0.1) [rectangle, green]  {\ding{51}};
-
-
-
-
-
-\draw [thick, fill=cyan] (14,0) -- (16,1) -- (16,-1) -- (14,0);
-
-\draw [thick, fill=gray]  (14.5,0.25) -- (16,0.25) -- (16,1) -- (14.5,0.25);
-\draw [thick] (14,0.25) -- (16.5,0.25);
-
-\draw [thick, fill=gray]  (15,-0.5) -- (16,-0.25) -- (16,-1) -- (15,-0.5);
-\draw [thick] (14,-0.75) -- (16.5,-.125);
-
-\draw [thick, fill=gray]  (14.5,0) -- (14.75,0) -- (14.75,-0.25) -- (14.5,-0.25 ) -- (14.5,0) ;
-
-\draw [thick, fill=gray]  (15.5,0) -- (15.75,0) -- (15.75,0.23) -- (15.5,0.23 ) -- (15.5,0) ;
-
-\draw [fill=red] (16,0) circle [radius=0.1];
-
-\draw [fill=green] (14,0) circle [radius=0.1];
-
-\node at (15.2,-0.1) [rectangle, green]  {\ding{51}};
-
-\node at (14,-2) [rectangle]  {Fine-grained reduction};
-
-\end{tikzpicture}
-\caption{Delta-debugging minimization of a proof, with a checkmark signifying the highlighted portion of the proof was verified by an independent proof checker.}
-\label{fig:ddebug}
-\vspace{-10pt}
-\end{figure}
-\fi
 
 \newpage
 
