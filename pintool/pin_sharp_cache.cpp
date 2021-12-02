@@ -7,40 +7,21 @@
 #include <stdlib.h>
 #include "pin.H"
 
-#define MILLION 1000000
-#define THOUSAND 1000
-#define NUM_ORDERED_ACCESS_MISSES 20
+#define LINE_SIZE 64
 
 using namespace std;
 
-typedef struct Reference {
-    unsigned long count;
-    unsigned long misses;
-    unsigned long PC;
-} Ref;
-
 typedef struct Way_Struct {
     bool valid;
-    bool lru;
+    unsigned int lru;
     unsigned long tag;
 } Way;
 
-class Access {
-    public:
-        unsigned long address;
-        unsigned long count;
-        unsigned long misses;
-        bool type;
-        Access(unsigned long a, bool t, unsigned long c, unsigned long m){
-            address = a;
-            type = t;
-            count = c;
-            misses = m;
-        } 
-};
-
-bool better_access (Access *i,Access *j) { return (i->misses>j->misses); }
-
+/* Adjust these values at will */
+bool multi_spy; // attack 1
+bool shared_l2; // attack 2
+int spy_count;
+int spy_probability;
 
 class Cache {
     public:
@@ -50,7 +31,6 @@ class Cache {
         unsigned int line_size;
         unsigned int miss_penalty;
         unsigned int associativity;
-        vector<Access*> ordered_accesses;
 
         unsigned long tag_mask;
         unsigned long set_mask;
@@ -58,8 +38,6 @@ class Cache {
 
         unsigned long set_bits;
         unsigned long blk_bits;
-
-        map<pair<unsigned long, bool>, Reference*> all_accesses; 
 
         Way **sets;
     
@@ -71,7 +49,7 @@ class Cache {
         
 
         
-        Cache(unsigned int s, unsigned int ls, unsigned int mp, unsigned int a, bool sp) : ordered_accesses(NUM_ORDERED_ACCESS_MISSES) {
+        Cache(unsigned int s, unsigned int ls, unsigned int mp, unsigned int a, bool sp) {
             size = s;
             line_size = ls;
             miss_penalty = mp;
@@ -94,17 +72,17 @@ class Cache {
                 sets[i] = (Way*)malloc(sizeof(Way)*associativity);
                 for (unsigned long j = 0; j < associativity; j++){
                     sets[i][j].valid = false;
-                    sets[i][j].lru = true;
+                    sets[i][j].lru = 0;
                 }
             }
             
             sharp = sp;
             alarm_counter = 0;
             
-            owner = malloc (sizeof (int *) * set_number);
+            owner = (int **) malloc (sizeof(int *) * set_number);
             
             for (unsigned long i = 0; i < set_number; i++){
-                owner[i] = malloc (sizeof (int) * associativity);
+                owner[i] = (int *) malloc(sizeof(int) * associativity);
                 for (unsigned long j = 0; j < associativity; j++){
                     owner[i][j] = -1 ;
                 }
@@ -119,46 +97,19 @@ class Cache {
             return (addr & set_mask) >> blk_bits;
         }
 
-        void compute_ordered_misses(int number){
-            unsigned long acc = 0;
-
-            vector<Access*> all_accesses_vec;
-
-            for (auto const& it : all_accesses){
-                acc++;
-                all_accesses_vec.push_back(new Access(it.first.first, it.first.second, it.second->count, it.second->misses));
-            }
-
-            partial_sort_copy(
-                all_accesses_vec.begin(), all_accesses_vec.end(), //.begin/.end in C++98/C++03
-                ordered_accesses.begin(), ordered_accesses.end(), 
-                better_access //remove "int" in C++14
-            );
-        }
-
-        int increment_access(pair<unsigned long, bool> key, bool type, bool is_miss){
-            if (all_accesses.count(key) == 0)
-                return 0;
-            
-            all_accesses[key]->count++;
-            if (is_miss){
-                all_accesses[key]->misses++;
-            }
-
-            return 1;
-        }
-
         bool find_tag_in_set(unsigned long set, unsigned long addr){
             Way *ways = sets[set];
-            // TODO: updated for set size greater than 2
+
+            unsigned int maximum = 0;
+            for (unsigned long way = 0; way < associativity; way++){
+                if (ways[way].lru > maximum){
+                    maximum = ways[way].lru;
+                }
+            }
 
             for (unsigned long i = 0; i < associativity; i++){
                 if (ways[i].valid && tags_equal(addr, ways[i].tag)){
-                    ways[i].lru = false;
-                    
-                    if (associativity > 1)
-                        ways[1-i].lru = true;
-                        
+                    ways[i].lru = maximum+1; /* Most recently used address, so lru is max LRU + 1 */
                     return false;
                 }
             }
@@ -166,46 +117,77 @@ class Cache {
             return true;
         }
 
+        void swap(unsigned long *lrus, unsigned long *ways, int index1, int index2){
+            unsigned long temp1 = lrus[index1];
+            unsigned long temp2 = ways[index1];
+            lrus[index1] = lrus[index2];
+            ways[index1] = ways[index2];
+            lrus[index2] = temp1;
+            ways[index2] = temp2;
+        }
+
+        void sort_lru_list(unsigned long *ways, unsigned long set){
+            /* Sort ways in a set so that we can iterate them by LRU order */
+            unsigned long lrus[associativity];
+
+            for (unsigned long way = 0; way < associativity; way++){
+                ways[way] = way;
+                lrus[way] = sets[set][way].lru;
+            }
+
+            /* I mean, max associativity is not that high, we can do bubble sort */
+            for(unsigned int i = 0; i < associativity-1; i++){
+                for (unsigned j = 0; j < associativity - i - 1; j++){
+                    if (lrus[j] > lrus[j+1]){
+                        swap(lrus, ways, j, j+1);
+                    }
+                }
+            }
+
+        }
+
         void evict_lru_block(unsigned long set, unsigned long addr){
             Way *ways = sets[set];
-            // TODO: updated for set size greater than 2
-            if (associativity == 1){
-                ways[0].valid = true;
-                ways[0].tag = addr & tag_mask;
-            }
-            else{
-                int i = 0;
-                if (ways[1].lru){
-                    i = 1;
-                }
-                ways[i].valid = true;
-                ways[i].tag = addr & tag_mask;
-                ways[i].lru = false;
-                ways[1-i].lru = true;
-            }
+
+            unsigned long ways_list[associativity];
+            sort_lru_list(ways_list, set);
+
+            unsigned int way = ways_list[0];
+            ways[way].valid = true;
+            ways[way].tag = addr & tag_mask;
+
+            ways[way].lru = ways[ways_list[associativity-1]].lru + 1;
         }
     
         // J
         void evict_sharp_block (unsigned long set, unsigned long addr, int core) {
             Way *ways = sets[set];
+
+            unsigned long ways_list[associativity];
+            sort_lru_list(ways_list, set);
+            unsigned long way;
+
             int candidate = -1;
             
             // STEP 1: check if a way is unused
-            for (int i = 0; i < associativity; i++) {
-                if (owner[set][i] == -1) {
-                    candidate = i;
+            for (unsigned int i = 0; i < associativity; i++) {
+                way = ways_list[i]; /* Access way in LRU order */
+                if (owner[set][way] == -1) {
+                    candidate = way;
                     break;
                 }
             }
+
             if (candidate > -1) {
                 ways[candidate].valid = true;
                 ways[candidate].tag = addr & tag_mask;
-                owner[set][i] = core;
+                owner[set][candidate] = core;
                 return;
             }
             
             // STEP 2: check if a way is owned by calling processor
-            for (int i = 0; i < associativity; i++) {
+            for (unsigned int i = 0; i < associativity; i++) {
+                way = ways_list[i];
                 if (owner[set][i] == core) {
                     candidate = i;
                     break;
@@ -214,7 +196,7 @@ class Cache {
             if (candidate > -1) {
                 ways[candidate].valid = true;
                 ways[candidate].tag = addr & tag_mask;
-                owner[set][i] = core;
+                owner[set][candidate] = core;
                 return;
             }
             
@@ -222,17 +204,15 @@ class Cache {
             candidate = rand() % associativity;
             ways[candidate].valid = true;
             ways[candidate].tag = addr & tag_mask;
-            owner[set][i] = core;
+            owner[set][candidate] = core;
             alarm_counter[core]++; // update alarm counter
             return;
   
         }
 
-        void access(unsigned long addr, bool is_load, unsigned long pc, int core){
+        bool access(unsigned long addr, bool is_load, int core){
             accesses++;
             
-            pair<unsigned long, bool> key(pc, is_load);
-
             unsigned long set = get_set_index(addr);
 
 
@@ -245,24 +225,29 @@ class Cache {
                 else evict_lru_block(set, addr);
             }
 
+            return is_miss;
+        }
 
-            /* Update the global access_count/miss_count for this specific address */
-            int already_accessed = increment_access(key, is_load, is_miss);
-            if (!already_accessed){
-                Ref *access = (Ref *)malloc(sizeof(Ref)); /* TODO - Free this in Fini */
-                access->count = 1;
-                access->misses = 1;
-                all_accesses[key] = access;
+        bool store(unsigned long addr, int core){
+            return access(addr, false, core);
+        }
+        bool load(unsigned long addr, int core){
+            return access(addr, true, core);
+        }
+
+        void print_contents(){
+            unsigned long set_number = size * 1024 / line_size / associativity;
+            for (unsigned long set = 0; set < set_number; set++){
+                for (unsigned int way = 0; way < associativity; way++){
+                    if (sets[set][way].valid){
+                        cout << "Set: " << set << " Way: " << way << " Tag: " << sets[set][way].tag << " (" << sets[set][way].lru << ")" << endl;
+                    }
+                }
             }
         }
-
-        void store(unsigned long addr, unsigned long pc, int core){
-            access(addr, false, pc, core);
-        }
-        void load(unsigned long addr, unsigned long pc, int core){
-            access(addr, true, pc, core);
-        }
 };
+
+BOOL data_cache_load(unsigned long addr, int core);
 
 // J
 class Spy {
@@ -298,7 +283,11 @@ public:
             if (shared) {} // attack 2
             else { // attack 1
                 // call load and check if hit
-                bool hit = data_cache_load(); // arguments? (how to check if hit?)
+                /*
+                    TODO: Choose good address and core
+                    TODO: How to check if it is a hit
+                */
+                bool hit = data_cache_load(0x0, 0);
                 hits.push_back(hit);
                 
                 // update wait time
@@ -310,45 +299,32 @@ public:
             }
         }
     }
-}
+};
 
-//Cache *data_cache;
-Cache *instr_cache;
-
-//J
-Cache *l1_cache;
 Cache *l2_cache;
 Cache *l3_cache;
-
-int spy_count;
-bool multi_spy; // attack 1
-bool shared_l2; // attack 2
-int spy_probability;
-Spy * spies;
+Spy ** spies;
 
 VOID instr_cache_load(unsigned long ip) {
-//    instr_cache->accesses++;
-//    instr_cache->load(ip, ip);
-    // J
+    /*
+        TODO:   Pass the core argument correctly
+    */
     bool miss;
-    miss = instr_cache->load (ip, ip, core);
-    if (miss) miss = l2_cache->load (ip, ip, core);
-    if (miss) l3_cache->load (ip, ip, core);
+    miss = l2_cache->load (ip, 0);
+    if (miss) l3_cache->load (ip, 0);
 }
 
-VOID data_cache_load(unsigned long addr, unsigned long pc, int core){
+BOOL data_cache_load(unsigned long addr, int core){
     bool miss;
-    miss = l1_cache->load (addr, pc, core);
-    if (miss) miss = l2_cache->load (add, pc, core);
-    if (miss) l3_cache->load (add, pc, core);
-    
+    miss = l2_cache->load (addr, core);
+    if (miss) l3_cache->load (addr, core);
+    return miss;
 }
 
-VOID data_cache_store(unsigned long addr, unsigned long pc, int core){
+VOID data_cache_store(unsigned long addr, int core){
     bool miss;
-    miss = l1_cache->load (addr, pc, core);
-    if (miss) miss = l2_cache->load (add, pc, core);
-    if (miss) l3_cache->load (add, pc, core);
+    miss = l2_cache->load (addr, core);
+    if (miss) l3_cache->load (addr, core);
 }
 
 VOID spy_instruction(int spy){
@@ -369,7 +345,6 @@ VOID Instruction(INS ins, VOID *v)
             INS_InsertPredicatedCall(
                 ins, IPOINT_BEFORE,  (AFUNPTR) data_cache_load,
                 IARG_MEMORYOP_EA, memOp,
-                IARG_UINT64, ip,
                 IARG_UINT64, 0,
                 IARG_END);
         }
@@ -381,7 +356,6 @@ VOID Instruction(INS ins, VOID *v)
             INS_InsertPredicatedCall(
                 ins, IPOINT_BEFORE,  (AFUNPTR) data_cache_store,
                 IARG_MEMORYOP_EA, memOp,
-                IARG_UINT64, ip,
                 IARG_UINT64, 0,
                 IARG_END);
         }
@@ -402,12 +376,12 @@ VOID Instruction(INS ins, VOID *v)
 }
 
 // J
-void print_combinded_key () {
+void print_combined_key () {
     if (multi_spy) {
         // combine hits from spies
         vector<int> combined_key;
         bool prev_all = true;
-        for (int i = 0; i < spies[0]->hits.size(); i++) {
+        for (unsigned int i = 0; i < spies[0]->hits.size(); i++) {
             int cnt = 0;
             int out = -1;
             for (int s = 0; s < spy_count; s++) {
@@ -420,132 +394,82 @@ void print_combinded_key () {
             // miss on last spy means exponent used
             else if (i%2==0 && !spies[0]->hits[i]) out = 1;
             else if (i%2==1 && !spies[spy_count-1]->hits[i]) out = 1;
-            prev_all = (cnr == spy_count);
+            prev_all = (cnt == spy_count);
             combined_key.push_back (out);
         }
         cout << "Combined Key: ";
-        for (int i = 0; i < combined_key.size(); i++) cout << combined_key[i] << " ";
+        for (unsigned int i = 0; i < combined_key.size(); i++) cout << combined_key[i] << " ";
         cout << endl;
     }
 }
 
 VOID Fini(INT32 code, VOID *v)
 {
-    cout.precision(4);
-
-    // Print the actual results
-    unsigned long instr_exec = instr_cache->accesses;
-    unsigned long data_stalls = data_cache->misses*data_cache->miss_penalty;;
-    unsigned long instr_stalls = instr_cache->misses*instr_cache->miss_penalty;
-    unsigned long total = instr_exec + data_stalls + instr_stalls;
-    long double instr_exec_rate = (long double)(instr_exec * 100) / (long double)total;
-    long double data_stall_rate = (long double)(data_stalls * 100) / (long double)total;
-    long double instr_stall_rate = (long double)(instr_stalls * 100) / (long double)total;
-
-    cout << endl << endl << "Overall Performance Breakdown: " << endl;
-    cout << "==============================" << endl;
-    cout << "Instruction Execution: " << instr_exec/MILLION << "M cycles ( " << instr_exec_rate << "%)" << endl;
-    cout << "Data Cache Stalls: " << data_stalls/MILLION << "M cycles ( " << data_stall_rate << "%)" << endl;
-    cout << "Instruction Cache Stalls: " << instr_stalls/MILLION << "M cycles ( " << instr_stall_rate << "%)" << endl;
-    cout << "------------------------------------------------" << endl;
-    cout << "Total Execution Time: " << total/MILLION << "M cycles ( " << "100" << "%)" << endl << endl;
-
-    cout << "Data Cache:" << endl;
-    cout << "===========" << endl;
-
-    if (data_cache->associativity == 1)
-        cout << "Configuration: size = " << data_cache->size << "KB, line size = " << data_cache->line_size << "B, associativity = " << "DirectMapped" << ", miss latency = " << data_cache->miss_penalty << " cycles" << endl;
-    else
-        cout << "Configuration: size = " << data_cache->size << "KB, line size = " << data_cache->line_size << "B, associativity = " << "2-way" << ", miss latency = " << data_cache->miss_penalty << " cycles" << endl;
-
-    long double data_miss_rate = (long double)(data_cache->misses) * 100 / (long double) data_cache->accesses;
-    cout << "Overall Performance: " << data_cache->accesses/MILLION << "M References, " << data_cache->misses/MILLION << "M Misses, Miss Rate = " << data_miss_rate << "%, Data Cache Stalls = " << data_cache->misses*data_cache->miss_penalty/MILLION << "M cycles" << endl << endl;
-    cout << "Rank ordering of data references by absolute miss cycles:" << endl << endl;
-
-    cout << "\tPC\t\t| Type\t| References\t|Misses\t| Miss Rate\t| Total Miss Cycles\t| Contribution to Total Data Miss Cycles" << endl;
-    cout << "\t--------------------------------------------------------------------------------------------------------" << endl;
-
-    data_cache->compute_ordered_misses(NUM_ORDERED_ACCESS_MISSES);
-    int i = 0;
-    for (Access *acc : data_cache->ordered_accesses){
-        i++;
-        stringstream stream;
-        stream << "0x" << hex << acc->address;
-        string address_hex( stream.str() );
-        cout << i << ". \t"  
-        << address_hex << "\t| " 
-        << (acc->type? "Load" : "Store") << "\t| " 
-        << acc->count/(long double)THOUSAND << "K\t\t| " 
-        << acc->misses/(long double)THOUSAND << "K\t| " 
-        << (long double)acc->misses / (long double)acc->count << "\t\t| " 
-        << acc->misses*data_cache->miss_penalty/MILLION << "M\t\t| " 
-        << (long double)(acc->misses*data_cache->miss_penalty)*100 / (long double)data_stalls  << "%" << endl;
-    }
-
-    cout << endl;
-    
-    cout << "Instruction Cache:" << endl;
-    cout << "==================" << endl;
-    if (instr_cache->associativity == 1)
-        cout << "Configuration: size = " << instr_cache->size << "KB, line size = " << instr_cache->line_size << "B, associativity = " << "DirectMapped" << ", miss latency = " << instr_cache->miss_penalty << " cycles" << endl;
-    else
-        cout << "Configuration: size = " << instr_cache->size << "KB, line size = " << instr_cache->line_size << "B, associativity = " << "2-way" << ", miss latency = " << instr_cache->miss_penalty << " cycles" << endl;
-    
-    long double instr_miss_rate = (long double)(instr_cache->misses) * 100 / (long double) instr_cache->accesses;
-    cout << "Overall Performance: " << instr_cache->accesses/THOUSAND << "K References, " << instr_cache->misses/THOUSAND << "K Misses, Miss Rate = " << instr_miss_rate << "%, Inst Cache Stalls = " << instr_cache->misses*instr_cache->miss_penalty/MILLION << "M cycles" << endl << endl;
-    cout << "Rank ordering of instruction references by absolute miss cycles:" << endl;
-
-    cout << "\tPC\t\t| References\t|Misses\t| Miss Rate\t| Total Miss Cycles\t| Contribution to Total Inst Miss Cycles" << endl;
-    cout << "\t--------------------------------------------------------------------------------------------------------" << endl;
-
-    instr_cache->compute_ordered_misses(NUM_ORDERED_ACCESS_MISSES);
-    i = 0;
-    for (Access *acc : instr_cache->ordered_accesses){
-        i++;
-        stringstream stream;
-        stream << "0x" << hex << acc->address;
-        string address_hex( stream.str() );
-        cout << i << ". \t"  
-            << address_hex << "\t| " 
-            << acc->count/(long double)THOUSAND << "K\t\t| " 
-            << acc->misses/(long double)THOUSAND << "K\t| " 
-            << (long double)acc->misses / (long double)acc->count << "\t\t| " 
-            << acc->misses*instr_cache->miss_penalty/THOUSAND << "K\t\t| " 
-            << (long double)(acc->misses*instr_cache->miss_penalty)*100 / (long double)instr_stalls << "%"  << endl;
-    }
+    print_combined_key();
 }
 
 INT32 Usage(){
     cerr << "Our cache simulator tool." << endl;
-    cerr << "Usage: pin -t obj-intel64/pin_cache.so <cacheSize> <lineSize> <missPenalty> <associativity> -- cache_test/MMM.out " << endl;
+    cerr << "Usage: pin -t obj-intel64/pin_sharp_cache.so -- cache_test/MMM.out " << endl;
     return -1;
+}
+
+
+int main_test_caches(int argc, char **argv){
+    /* Test new changes to Caches,
+         considering associativity could be larger than 2, 
+         and we now load from multiple caches
+    */
+
+    unsigned int assoc_l2 = 4;
+    unsigned int assoc_l3 = 16;
+    unsigned long set_number_l2 = 256 * 1024 / LINE_SIZE / assoc_l2;
+
+    l2_cache = new Cache(256, LINE_SIZE, 100, assoc_l2, false);
+    l3_cache = new Cache(12288, LINE_SIZE, 100, assoc_l3, true); // l3 uses SHARP
+    
+    //BOOL data_cache_load(unsigned long addr, int core);
+
+    data_cache_load(0, 0);
+    data_cache_load(LINE_SIZE*set_number_l2, 0);
+    data_cache_load(LINE_SIZE*set_number_l2*2, 0);
+    data_cache_load(LINE_SIZE*set_number_l2*3, 0);
+    data_cache_load(LINE_SIZE*set_number_l2*4, 0);
+    data_cache_load(LINE_SIZE*set_number_l2*5, 0);
+    data_cache_load(LINE_SIZE*set_number_l2*6, 0);
+    data_cache_load(LINE_SIZE*set_number_l2*7, 0);
+
+    cout << "Loaded 4 colliding addresses" << endl;
+    cout << "L2 cache" << endl; l2_cache->print_contents();
+    cout << "L3 cache" << endl; l3_cache->print_contents();
+
+    return 0;
 }
 
 int main(int argc, char **argv)
 {
-
-    srand(0);
-    
-    if (argc < 11){
-        return Usage();
-    }
-
-    PIN_Init(argc, argv);
-    
-//    data_cache = new Cache(atoi(argv[5]), atoi(argv[6]), atoi(argv[7]), atoi(argv[8]));
-    instr_cache = new Cache(atoi(argv[5]), atoi(argv[6]), atoi(argv[7]), atoi(argv[8]), false);
-    // J
-    l1_cache = new Cache(8, 64, 100, 1, false);
-    l2_cache = new Cache(8, 64, 100, 2, false);
-    l3_cache = new Cache(8, 64, 100, 4, true); // l3 uses SHARP
+    spy_probability = 90; // chances a spy will insert an instruction
     
     // select attack
     multi_spy = true;
-    spy_count = 4;
-    
     shared_l2 = false;
+    spy_count = 4;
+
+    srand(0);
+    
+    /*if (argc < 11){
+        return Usage();
+    }*/
+
+    PIN_Init(argc, argv);
+    
+    /* Parameters taken from a real i7 processor */
+    l2_cache = new Cache(256, LINE_SIZE, 100, 4, false);
+    l3_cache = new Cache(12288, LINE_SIZE, 100, 16, true); // l3 uses SHARP
+    
+    
     if (shared_l2) spy_count = 2;
-    spies = malloc (sizeof (Spy *) * spy_count);
+    spies = (Spy**) malloc (sizeof (Spy *) * spy_count);
     if (shared_l2) {
         spies[0] = new Spy (0); // shares L2
         spies[1] = new Spy (1); // different core
@@ -556,12 +480,8 @@ int main(int argc, char **argv)
         }
     }
     
-    spy_probability = 90; // chances a spy will insert an instruction
-    
+
     INS_AddInstrumentFunction(Instruction, 0);
-
-    /* Implement your cache simulator here */
-
     PIN_AddFiniFunction(Fini, 0);
     
     // Start the program, never returns
@@ -570,11 +490,8 @@ int main(int argc, char **argv)
 }
 
 /* 
+    Compile with:
+        make obj-intel64/pin_sharp_cache.so
     Test with:
-        pin -t obj-intel64/pin_cache.so 8 64 100 1 -- cache_test/MMM.out 
-        pin -t obj-intel64/pin_cache.so 8 64 100 2 -- cache_test/MMM.out  
-        pin -t obj-intel64/pin_cache.so 8 128 100 2 -- cache_test/MMM.out  
-        pin -t obj-intel64/pin_cache.so 32 128 100 2 -- cache_test/MMM.out  
-
-        And the other sample targets too
+        pin -t obj-intel64/pin_sharp_cache.so -- ./rsa
 */
