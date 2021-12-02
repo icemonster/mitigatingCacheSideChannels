@@ -10,6 +10,29 @@
 
 gmp_randstate_t stat;
 
+
+void computeNandF(mpz_t* q, mpz_t* p, mpz_t *phi, mpz_t* n) {
+    
+    mpz_t temp1, temp2;
+    mpz_init(temp1);
+    mpz_init(temp2);
+    //n=p*q
+    mpz_mul(*n, *q, *p);
+    mpz_sub_ui(temp1, *q, 1); //temp1=q-1
+    mpz_sub_ui(temp2, *p, 1); //temp2=p-1
+    //φ=(p-1)(q-1)
+    mpz_mul(*phi, temp1, temp2);
+    printf("N = ");
+    mpz_out_str(stdout, 10, *n);
+    printf("\n------------------------------------------------------------------------------------------\n");
+}
+
+void square(mpz_t *result, mpz_t mod){
+    /* Square result modulo <mod> */
+    mpz_mul(*result, *result, *result);
+    mpz_mod(*result, *result, mod);
+}
+
 void generatePrimes(mpz_t* p, mpz_t* q) {
 
     int primetest;
@@ -52,33 +75,24 @@ void generatePrimes(mpz_t* p, mpz_t* q) {
     return;
 }
 
-void computeNandF(mpz_t* q, mpz_t* p, mpz_t *phi, mpz_t* n) {
-    
-    mpz_t temp1, temp2;
-    mpz_init(temp1);
-    mpz_init(temp2);
-    //n=p*q
-    mpz_mul(*n, *q, *p);
-    mpz_sub_ui(temp1, *q, 1); //temp1=q-1
-    mpz_sub_ui(temp2, *p, 1); //temp2=p-1
-    //φ=(p-1)(q-1)
-    mpz_mul(*phi, temp1, temp2);
-    printf("N = ");
-    mpz_out_str(stdout, 10, *n);
-    printf("\n------------------------------------------------------------------------------------------\n");
-}
-
-void square(mpz_t *result, mpz_t mod){
-    /* Square result modulo <mod> */
-    mpz_mul(*result, *result, *result);
-    mpz_mod(*result, *result, mod);
-}
-
 void multiply(mpz_t *result, mpz_t multiplier, mpz_t mod){
     /* Multiply result by <multiplier> modulo <mod> */
     mpz_mul(*result, *result, multiplier);
     mpz_mod(*result, *result, mod);
 }
+
+void start_message(){
+    printf("This program generates a pair of primes (p, q) and multiply them together to get a public key\n");
+    printf("The private exponent is the modular inverse of e modulo phi = (p-1)*(q-1)\n");
+    printf("Our goal is to leak this private exponent, which is used by the square and multiply algorithm when signing\n");
+}
+
+void end_message(){
+    printf("Thanks for trying our RSA implementation\n");
+    printf("We hope you had a wonderful time leaking cache contents using side channels\n");
+    printf("Even when SHARP is enabled\n");
+}
+
 
 void sign(mpz_t* result, mpz_t* c, mpz_t* d, mpz_t* n) {
     char private_exp[1024]; /* Assumes 1024 bit keys */ 

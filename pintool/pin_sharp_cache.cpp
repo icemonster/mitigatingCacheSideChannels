@@ -464,10 +464,9 @@ public:
                             if (time_to_wait >= 36){ // Cheating for now
                                 iteration_started = true;
                                 cout << "Leaked that iteration started " << endl;
-                                break;
                             }
                         }
-                        ready += 200;
+                        ready += 1;
                     }
                     else{
                         bool exponent_is_1 = false;
@@ -480,7 +479,7 @@ public:
                         cout << "Leaked that exponent is " << exponent_is_1 << endl;
                         hits.push_back(exponent_is_1);
                         iteration_started = false;
-                        ready += 1;
+                        ready += 100;
                     }
                 }
             } 
@@ -626,13 +625,13 @@ void print_combined_key () {
     }
     else{
         cout << "Key: ";
-        for (unsigned int i = 0; i < spies[1]->hits.size(); i++){
-            if (spies[1]->hits[i])
+        for (unsigned int i = 4; i < spies[1]->hits.size(); i+= 2){
+            if (spies[1]->hits[i] && !spies[1]->hits[i+1])
                 cout << "1";
             else
                 cout << "0";
         }
-        cout << endl;
+        cout << "1" << endl;
     }
 }
 
@@ -926,5 +925,5 @@ int main(int argc, char **argv)
     Compile with:
         make obj-intel64/pin_sharp_cache.so
     Test with:
-        pin -t obj-intel64/pin_sharp_cache.so 0x401697 0x4016dc -- ./rsa
+        pin -t obj-intel64/pin_sharp_cache.so 0x4014e3 0x4016dc -- ./rsa
 */
