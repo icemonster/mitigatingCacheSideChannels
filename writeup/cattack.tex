@@ -46,23 +46,23 @@ In this work we focus on attacks that leverage eviction protocols in a shared L3
 \begin{figure}[h]
 \centering
 \includegraphics[scale=0.9]{../presentation/sqm.png}
-\caption{Square multiply algorithm. Image from the SHARP paper~\cite{sharp}.}
+\caption{Square and Multiply algorithm. Image from the SHARP paper~\cite{sharp}.}
 \label{fig:sm}
 \end{figure}
 
 As an example, take the square and multiply algorithm~\cite{exp} used to compute encrypted messages for RSA encryption.
-The program executing the algorithm in Figure~\ref{fig:sm}, which we will call the {\it victim}, will execute line $6$ only when there is an exponent in the encryption key. 
-Further, the victim will execute line $3$ after each iteration.
-Note that the time between iterations is large because the instructions are often operating over long messages.
-If a malignant process, which we will call the {\it spy}, knows when the victim executes lines $3$ and $6$, it can recover the encryption key used by the victim.
+The program executing the algorithm in Figure~\ref{fig:sm}, which we call the {\it victim}, will execute line $6$ only when the current bit of the private exponent is 1. 
+Regardless of the bit value, the victim will execute line $3$ after each iteration.
+Note that the time between iterations is large because the instructions are often operating on big numbers ($> 2000$ bits).
+If a malignant process, which we will call the {\it spy}, knows the victim's execution pattern of the lines $3$ and $6$, it can recover the encryption key used by the victim.
 
-Many styles of cache side-channel attack to recover the encryption key have been researched, including {\it flush and reload}, {\it evict and reload}, {\it prime and probe}, etc. 
-We will focus on prime and probe attacks, with an example shown in Figure~\ref{fig:pp}.
+Many styles of cache side-channel attacks to recover the encryption key have been researched, including {\it flush and reload}, {\it evict and reload} and {\it prime and probe}, to name a few. 
+We will focus on prime and probe attacks, which we exemplify in Figure~\ref{fig:pp}.
 This attack assumes the victim and spy are running on different cores but share an L3 cache.
-In addition, the spy must know which cache set instruction $3$ from the square and multiply algorithm is mapped to.
+In addition, the spy must know which cache set the address of $mul$ (called in instruction $6$ in Figure~\ref{fig:sm}) is mapped to.
 The attack begins with the spy priming the cache set through several load instructions.
 In step $1$ the spy makes four loads to fill up the cache set with an associativity of four.
-Then the victim may load instruction $3$ (represented as the green dot) into memory if there is an exponent in the encryption key.
+Then the victim may execute instruction $6$ and call the $mul$ function, loading it (represented as the green dot) into memory if there is an exponent in the encryption key.
 During step $2$ the spy waits.
 At step $3$ the spy reloads all four memory addresses, and if there is a miss the spy assumes the victim had an exponent bit.
 Alternatively, if the victim did not have an exponent bit the spy should have all hits.
@@ -79,7 +79,7 @@ We do not focus on these platform specific numbers, and instead model our attack
 \begin{figure}[t]
 \centering
 \includegraphics[scale=0.8]{../presentation/cattack.png}
-\caption{Example of a prime and probe attack at the level three shared cache with a set size of four.}
+\caption{Prime and probe attack showing content of a set in a 4-way L3 shared cache.}
 \label{fig:pp}
 \end{figure}
 
@@ -88,19 +88,19 @@ Our project involved implementing high-level simulations of the SHARP protocol,
 then deploying two styles of prime and probe attacks that bypassed the protocol.
 One attack uses multiple spies on multiple cores ({\it Multiple Spies}) and the other uses spies sharing the victims core ({\it Shared Core}).
 We ran experiments on a deterministic python simulator as a proof of concept.
-We then constructed a pintool to show that our attacks work when some noise is added to the experiment.
+We then constructed a pintool to show that our attacks work even when some noise is added to the experiment.
 
 
 \section{SHARP}
 
-The Secure Hierarchy-Aware cache Replacement Policy (SHARP) is a cache eviction policy set at a shared L3 cache designed to mitigate cache side-chanel attacks~\cite{sharp}.
+The Secure Hierarchy-Aware cache Replacement Policy (SHARP) is a cache eviction policy designed to work in a shared L3 cache and mitigate cache side-chanel attacks~\cite{sharp}.
 The general idea of SHARP is to prevent {\it inclusion victims}.
 An inclusion victim is created when data evicted in the shared L3 is active in a core's private L2 cache.
 That data must then be evicted from the private L2 to preserve inclusivity.
 Preventing inclusion victims should mitigate attacks of the sort in Figure~\ref{fig:pp} because the attack relies on the prime step which evicts the victims instruction from memory.
-This would cause an inclusion victim and be prevented.
-So, when the spy tries to prime the reload its four pieces of data into the shared L3,
-it will not be able to fill the cache sit and evict the victim.
+This would cause an inclusion victim and is therefore prevented.
+So, when the spy tries to prime its four pieces of data into the shared L3,
+it will not be able to fill the cache set and evict the victim.
 
 It is infeasible to prevent inclusion victims in every case, e.g., a cache set may contain cache lines that all create inclusion victims if evicted leading to a deadlock scenario.
 Therefore, the SHARP design provides a multi-step process for implementing the eviction policy when a core accesses memory:
@@ -114,7 +114,7 @@ Therefore, the SHARP design provides a multi-step process for implementing the e
 \end{enumerate}
 
 The alarm counter helps identify when a core is causing frequent random evictions in step $3$.
-This information can be used by the operating system to investigate processes running on a certain core.
+This information can be used by the operating system to investigate processes running on a certain core. The authors recommend using a threshold of 2000 alarm triggers per core every one billion cycles to detect attacks. Legitimate executions should not surpass that value.
 Core Valid Bits (CVBs) are used to determine when a cache line is owned by a core, i.e., the data is active in the core's private L2 cache.
 SHARP describes three methods for maintaining the CVBs, involving lazy updates or snoopy monitoring.
 In our implementation, we assume the CVBs are accurate under a snoopy protocol, meaning the CVB is set iff the data is active in the core's L2 cache. 
