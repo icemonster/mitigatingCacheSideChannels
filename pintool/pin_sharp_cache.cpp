@@ -44,7 +44,8 @@ bool multi_spy; // attack 1
 bool shared_l2; // attack 2
 int spy_count;
 int spy_probability;
-
+long wait_time;
+bool start_multi = false;
 unsigned long number_cores = 0;
 unsigned long timestamp = 0;
 
@@ -407,17 +408,19 @@ public:
     
     int spy_id;
     int ready;
-    int cnt;
-    int wait_time;
+    int cnt, prevCntI, prevCntE;
+    int wait_t;
+    int round;
     vector<bool> hits;
     unsigned long set_number_l3;
     unsigned long set_number_l2;
     bool iteration_started;
 
     Spy (int id) {
-        cnt = 0;
+        cnt = prevCntI = prevCntE = 0;
         ready = 0;
-        wait_time = 30; //?
+        round = 0;
+        wait_t = wait_time; //?
         spy_id = id; /* Also represents the core it is located in */
         set_number_l3 = l3_cache->size * 1024 / LINE_SIZE / l3_cache->associativity;
         set_number_l2 = l2_cache->size * 1024 / LINE_SIZE / l2_cache->associativity;
@@ -448,8 +451,9 @@ public:
                 }
             } 
             else { // attack 1
-                int offset = wait_time - spy_id;
-                ready += offset;
+                if (!start_multi) {cnt--;return;}
+                int offset = spy_id;
+                ready += offset + 20000; // 20k for startup instructions
             }
             return;
         }
@@ -473,8 +477,9 @@ public:
                             time_to_wait = load(square_addr + LINE_SIZE*set_number_l3*i, spy_id);
                             if (time_to_wait >= L3_CACHE_MISS_PENALTY - CACHE_NOISE/4){
                                 iteration_started = true;
-                                cout << "Leaked that iteration started " << endl;
-                            }
+                                cout << "Leaked that iteration started " << cnt-prevCntI << endl;
+                        	prevCntI=cnt; 
+			  }
                         }
                         ready += 1;
                     }
@@ -486,10 +491,11 @@ public:
                                 exponent_is_1 = true;
                             }
                         }
-                        cout << "Leaked that exponent is " << exponent_is_1 << endl;
+                        cout << "Leaked that exponent is " << exponent_is_1 << " " << cnt-prevCntE <<  endl;
                         hits.push_back(exponent_is_1);
                         iteration_started = false;
                         ready += 100;
+			prevCntE=cnt;
                     }
                 }
             } 
@@ -499,15 +505,19 @@ public:
                     TODO: Choose good address
                     TODO: How to check if it is a hit
                 */
-                unsigned time_to_wait = load(LINE_SIZE*set_number_l3*spy_id, spy_id);
-                ready += time_to_wait;
-                hits.push_back(true); /* TODO - Update algorithm accordingly. We no longer have a <hit> or <miss> indicator */
                 
+                unsigned time_to_wait = load(multiply_addr +  LINE_SIZE*set_number_l3*spy_id, spy_id);
+                //ready += time_to_wait;
+                bool hit = false;
+                if (time_to_wait < L3_CACHE_MISS_PENALTY - CACHE_NOISE/4) hit = true;
+                hits.push_back(hit); /* TODO - Update algorithm accordingly. We no longer have a <hit> or <miss> indicator */
+                cout << "SPY " << spy_id << " hit: " << hit << endl;                
                 // update wait time
                 //   currently fine-grained, i.e., 1 unit difference between spies
                 int offset = 0;
-                if (cnt%2==1) offset = (wait_time + (spy_count - spy_id - 1)) - spy_id;
-                else offset = (wait_time + spy_id) - (spy_count - spy_id - 1);
+                if (round%2==0) offset = (wait_t + (spy_count - spy_id - 1)) - spy_id;
+                else offset = (wait_t + spy_id) - (spy_count - spy_id - 1);
+                round++;
                 ready += offset;
             }
         }
@@ -524,6 +534,7 @@ VOID instr_cache_load(unsigned long ip) {
 
     /* TESTING function addresses    */
     if (ip == square_addr){
+        start_multi = true;
         cout << "square" << endl;
     }
     else if(ip == multiply_addr){
@@ -613,6 +624,8 @@ void print_combined_key () {
         // combine hits from spies
         vector<int> combined_key;
         bool prev_all = true;
+        bool first = false;
+        int knowns=0;
         for (unsigned int i = 0; i < spies[0]->hits.size(); i++) {
             int cnt = 0;
             int out = -1;
@@ -627,11 +640,15 @@ void print_combined_key () {
             else if (i%2==0 && !spies[0]->hits[i]) out = 1;
             else if (i%2==1 && !spies[spy_count-1]->hits[i]) out = 1;
             prev_all = (cnt == spy_count);
-            combined_key.push_back (out);
+            if (first || out == 1) first = true;
+            if (first) combined_key.push_back (out);
         }
         cout << "Combined Key: ";
-        for (unsigned int i = 0; i < combined_key.size(); i++) cout << combined_key[i];
+        for (unsigned int i = 0; i < combined_key.size(); i++) 
+          {if (combined_key[i]==-1) cout << "?";
+           else {knowns++;cout << combined_key[i];}}
         cout << endl;
+        cout << "Percentage found: " << 100 * (float) knowns / combined_key.size() << endl;
     }
     else{
         cout << "Key: ";
@@ -887,8 +904,8 @@ int main(int argc, char **argv)
     spy_probability = 100; // chances a spy will insert an instruction
     
     // select attack
-    multi_spy = false;
-    shared_l2 = true;
+    multi_spy = true;
+    shared_l2 = false;
 
     if (shared_l2){
         spy_count = 2;
@@ -905,9 +922,9 @@ int main(int argc, char **argv)
         return Usage();
     }
 
-    square_addr = strtol(argv[5], NULL, 16);
-    multiply_addr = strtol(argv[6], NULL, 16);
-
+    square_addr = strtol(argv[6], NULL, 16);
+    multiply_addr = strtol(argv[7], NULL, 16);
+    wait_time = strtol(argv[8], NULL, 10);
     PIN_Init(argc, argv);
     
     /* Parameters taken from a real i7 processor (3.4 GHz i7-4770). L3 cache size is made to be a power of 2 */
