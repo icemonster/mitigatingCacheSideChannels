@@ -154,7 +154,7 @@ The exponent bit can be inferred in the following cases for each iteration:
 \item The exponent bit is $0$ if all spies have cache hits. This means the victim never put data into the cache set.
 \item The exponent bit is $1$ if all spies had cache hits in the previous iteration and some spies have cache misses in the current iteration. This means the victim may have put data into the cache set causing a cache miss.
 \item The exponent bit is $1$ if the $n^{th}$ spy which loads first after the victim has a cache miss. The $n^{th}$ spy was the last to load during the prime stage, so no other spy could have evicted its data. This means the victim may have evicted it. This happens with probability $\frac{1}{n}$ as the victim would evict some spy at random.
-\item Otherwise, the exponent bit is unknown (we represent this a $-1$ in our simulations).
+\item Otherwise, the exponent bit is unknown (we represent this a ? in our simulations).
 
 \end{enumerate}
 
@@ -231,6 +231,44 @@ The spies, cache hierarchy, SHARP protocol, and global timing were implemented i
 Describe Implementation 
 
 Describe Resulsts
+
+\subsection{Multiple Spy Attack Evaluation}
+
+In the shared core attack the spy on the separate core can determine through repeated probes when the square instruction has been used by the victim, prompting the spy to check if the multiply instruction was used.
+This is not possible in the multiple spy attack.
+Assuming the spies cannot communicate in real-time, which would require significant overhead and coordination, the spies combine information about hits and misses after execution to generate the leaked key.
+Under this framework, the spies will only collect information about the multiply instruction.
+Each spy acts independently with the following operation: 
+\begin{enumerate} 
+\item load (multiply address + line size $\times$ L3 set number  $\times$ spyId)
+\item if load time is greater than L3 hit time, record miss
+\item wait for $t$ amount of time then repeat
+\end{enumerate}
+
+The difficulty of this approach is determining a good $t$ value. 
+We experimentally found the instruction count in between iterations of the RSA algorithm with an exponent is $7244$ and without an exponent is $4980$.
+If $t > 7244$ the spies will skip some iterations as they collect the leaked bits and if $t <7244$ the spies will collect the same leaked bit twice for some iterations.
+We cannot adjust $t$ dynamically since the spies cannot determine if the multiply instruction was used until all spy information is combined. 
+
+For our experiments we choose $t$ to be $4980$ ensuring we collect at least one bit each iteration.
+We run multiple executions and combine the partial keys in an attempt to recover the original key.
+Recall each iteration can only learn approximately $frac_{1}{n}$ bits because of the random eviction in step $3$ of SHARP.
+The random values are computed dynamically so we learn a different $frac_{1}{n}$ bits with each execution.
+
+\begin{verbatim}
+10??01???
+?00???1??
+1????0??1
+...
+\end{verbatim}
+
+The partial keys after each execution will look like the strings above.
+We line them up and generate the full key when all positions in the key have been determined.
+There should be no conflicting positions in our pintool, but it could happen if for example another program was loading data into the cache set.
+Since $t<7244$ the full key will be longer than the original key with some duplicated bits where the spies probed twice with a single square and multiply iteration.
+This could be solved by varying $t$ values across executions to determine when bits have been duplicated in the full key, but we did not have time to investigate this feature.
+
+Table? shows the number of unknown bits after each execution for a set size of 16 with $t$ as 4980. 
 
 \section{Conclusion and Future Work}
 
