@@ -250,15 +250,24 @@ We experimentally found the instruction count in between iterations of the RSA a
 If $t > 7244$ the spies will skip some iterations as they collect the leaked bits and if $t <7244$ the spies will collect the same leaked bit twice for some iterations.
 We cannot adjust $t$ dynamically since the spies cannot determine if the multiply instruction was used until all spy information is combined. 
 
+\begin{figure}[h]
+\centering
+\includegraphics[scale=0.5]{../presentation/multi-order.png}
+\caption{Example scheduling with victim (v) on the top line where operation time when key has an exponent is longer (blue) than if the key does not have an exponent (green). The attackers wait time can be long (A1) but some iterations will be missed, and if the wait time is short (A2) some iterations will be duplicated.}
+\label{fig:mo}
+\end{figure}
+
+
 For our experiments we choose $t$ to be $4980$ ensuring we collect at least one bit each iteration.
+This corresponds with A2 of Figure~\ref{fig:ms}.
 We run multiple executions and combine the partial keys in an attempt to recover the original key.
-Recall each iteration can only learn approximately $frac_{1}{n}$ bits because of the random eviction in step $3$ of SHARP.
-The random values are computed dynamically so we learn a different $frac_{1}{n}$ bits with each execution.
+Recall each iteration can only learn approximately $\frac{1}{n}$ bits because of the random eviction in step $3$ of SHARP.
+The random values are computed dynamically so we learn a different $\frac{1}{n}$ bits with each execution.
 
 \begin{verbatim}
 10??01???
 ?00???1??
-1????0??1
+1????1??1
 ...
 \end{verbatim}
 
@@ -268,7 +277,26 @@ There should be no conflicting positions in our pintool, but it could happen if 
 Since $t<7244$ the full key will be longer than the original key with some duplicated bits where the spies probed twice with a single square and multiply iteration.
 This could be solved by varying $t$ values across executions to determine when bits have been duplicated in the full key, but we did not have time to investigate this feature.
 
-Table? shows the number of unknown bits after each execution for a set size of 16 with $t$ as 4980. 
+\begin{figure}[h]
+\centering
+\includegraphics[scale=0.7]{../presentation/mult-spy-p.png}
+\caption{Combining keys after each iteration and measuring the number of unknown bits, the number of duplicated iterations, the number of incorrect matches, and the number of correct matches.}
+\label{fig:msp}
+\end{figure}
+
+Figure~\ref{fig:msp} shows the results of combining keys after each execution for a set size of 16 with $t$ as 4980. 
+The keys were combined by lining them up based on the first leaked bit (they all found the first exponent bit because they primed the sets before the victim made its first access). 
+The number of unknown bits after each execution decreases by approximately $\frac{1}{16}$ after each execution as expected.
+The number of correct bits and duplicates should have an inverse relation to the unknown bits but this is not the case.
+These results may have been affected by conflicting bits in the partial keys.
+The spies load in $n$ consecutive instructions, and if the victim loading within that window it could cause conflicting information between executions.
+In addition, the combined key could be matched with the original key in a more sophisticated way.
+Using some other metric for comparing strings may show better results.
+
+These results can be duplicated using the script:
+\begin{verbatim}
+sh multi-spy-attack.sh <iterations> <square addr> <multiply addr> 
+\end{verbatim}
 
 \section{Conclusion and Future Work}
 
