@@ -273,7 +273,7 @@ The random values are computed dynamically so we learn a different $\frac{1}{n}$
 
 The partial keys after each execution will look like the strings above.
 We line them up and generate the full key when all positions in the key have been determined.
-There should be no conflicting positions in our pintool, but it could happen if for example another program was loading data into the cache set.
+Conflicting bits between partial keys could happen if for example another program was loading data into the cache set.
 Since $t<7244$ the full key will be longer than the original key with some duplicated bits where the spies probed twice with a single square and multiply iteration.
 This could be solved by varying $t$ values across executions to determine when bits have been duplicated in the full key, but we did not have time to investigate this feature.
 
@@ -286,10 +286,12 @@ This could be solved by varying $t$ values across executions to determine when b
 
 Figure~\ref{fig:msp} shows the results of combining keys after each execution for a set size of 16 with $t$ as 4980. 
 The keys were combined by lining them up based on the first leaked bit (they all found the first exponent bit because they primed the sets before the victim made its first access). 
+They were matched against the original key by sweeping through the combined key and determining if the bit at the current position matched the original bit or matched the original's previous bit in the case of a duplicate.
+If neither values matched or there was an unknown bit in the combined key, the iteration continued at the next position.
 The number of unknown bits after each execution decreases by approximately $\frac{1}{16}$ after each execution as expected.
 The number of correct bits and duplicates should have an inverse relation to the unknown bits but this is not the case.
 These results may have been affected by conflicting bits in the partial keys.
-The spies load in $n$ consecutive instructions, and if the victim loading within that window it could cause conflicting information between executions.
+The spies loaded in $n$ consecutive instructions, and if the victim loaded within that window it could cause conflicting information between executions.
 In addition, the combined key could be matched with the original key in a more sophisticated way.
 Using some other metric for comparing strings may show better results.
 
