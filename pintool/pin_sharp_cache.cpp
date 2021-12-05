@@ -452,7 +452,8 @@ public:
             } 
             else { // attack 1
                 if (!start_multi) {cnt--;return;}
-                int offset = spy_id;
+                int offset = spy_id; // ordered spy attack
+                offset = 0;
                 ready += offset + 20000; // 20k for startup instructions
             }
             return;
@@ -515,8 +516,10 @@ public:
                 // update wait time
                 //   currently fine-grained, i.e., 1 unit difference between spies
                 int offset = 0;
-                if (round%2==0) offset = (wait_t + (spy_count - spy_id - 1)) - spy_id;
-                else offset = (wait_t + spy_id) - (spy_count - spy_id - 1);
+		// ordered spy attack 
+                //if (round%2==0) offset = (wait_t + (spy_count - spy_id - 1)) - spy_id;
+                //else offset = (wait_t + spy_id) - (spy_count - spy_id - 1);
+                offset = wait_t;
                 round++;
                 ready += offset;
             }
@@ -637,8 +640,9 @@ void print_combined_key () {
             // previous all hits and now miss means exponent used
             else if (prev_all && cnt < spy_count) out = 1;
             // miss on last spy means exponent used
-            else if (i%2==0 && !spies[0]->hits[i]) out = 1;
-            else if (i%2==1 && !spies[spy_count-1]->hits[i]) out = 1;
+            // ordered spy attack
+	    //else if (i%2==0 && !spies[0]->hits[i]) out = 1;
+            //else if (i%2==1 && !spies[spy_count-1]->hits[i]) out = 1;
             prev_all = (cnt == spy_count);
             if (first || out == 1) first = true;
             if (first) combined_key.push_back (out);
@@ -916,7 +920,7 @@ int main(int argc, char **argv)
         number_cores = L3_ASSOC + 1;
     }
 
-    srand(0); /* Make stuff deterministic for easier debugging */
+    srand(strtol(argv[9],NULL,10)); /* Make stuff deterministic for easier debugging */
     
     if (argc < 7+2){
         return Usage();
