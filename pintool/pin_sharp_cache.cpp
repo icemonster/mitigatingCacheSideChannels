@@ -16,7 +16,7 @@
 
 /* Assuming 1 cycle per instruction */
 #define CPI 1
-#define CACHE_NOISE_ENABLED false /* Much slower if enabled because each cache load calls rand() */
+#define CACHE_NOISE_ENABLED true /* Much slower if enabled because each cache load calls rand() */
 #define CACHE_NOISE 10 // Maximum noise in cycles introduced by the cache. times will vary between -CACHE_NOISE/2 and CACHE_NOISE/2
 
 /*  SHARP, end of section 7.3, "Hence, we recommend to use SHARP4 and use a threshold of 2,000 alarm events in 1 billion cycles" */
@@ -48,6 +48,7 @@ long wait_time;
 bool start_multi = false;
 unsigned long number_cores = 0;
 unsigned long timestamp = 0;
+unsigned int cache_noise;
 
 /* Pass these as argument. Spies will use them to evict the correct address */
 long unsigned int square_addr;
@@ -277,7 +278,7 @@ class Cache {
             bool is_miss = find_tag_in_set(set, addr);
 
             result->miss = is_miss;
-            result->penalty = CACHE_NOISE/2+1;
+            result->penalty = cache_noise/2+1;
             result->evicted = false;
             result->evicted_addr = 0;
             result->evicted_core = 0;
@@ -398,7 +399,7 @@ unsigned long load(unsigned long addr, int core){
     }
 
     if (CACHE_NOISE_ENABLED)
-        return penalty + (rand() % CACHE_NOISE) - CACHE_NOISE/2;
+        return penalty + (rand() % cache_noise) - cache_noise/2;
     else
         return penalty;
 }
@@ -476,26 +477,33 @@ public:
                     if (iteration_started == false){
                         for (unsigned int i = 1; i < L3_ASSOC+1; i++){
                             time_to_wait = load(square_addr + LINE_SIZE*set_number_l3*i, spy_id);
-                            if (time_to_wait >= L3_CACHE_MISS_PENALTY - CACHE_NOISE/4){
+                            if (time_to_wait >= L3_CACHE_MISS_PENALTY - cache_noise/2){
                                 iteration_started = true;
-                                cout << "Leaked that iteration started " << cnt-prevCntI << endl;
+                                cout << "Leaked that iteration started " << time_to_wait << " " << L3_CACHE_MISS_PENALTY << " " << cache_noise << " " << cnt-prevCntI << endl;
                         	prevCntI=cnt; 
 			  }
                         }
-                        ready += 1;
+                        if (!iteration_started)
+                            ready += 500; /* Keep watching in blocks of X cycles */
+                        else
+                            ready += 5124; /* Execute square */
+
                     }
                     else{
                         bool exponent_is_1 = false;
                         for (unsigned int i = 1; i < L3_ASSOC+1; i++){
                             time_to_wait = load(multiply_addr + LINE_SIZE*set_number_l3*i, spy_id);
-                            if (time_to_wait >= L3_CACHE_MISS_PENALTY - CACHE_NOISE/4){
+                            if (time_to_wait >= L3_CACHE_MISS_PENALTY - cache_noise/2){
                                 exponent_is_1 = true;
                             }
                         }
                         cout << "Leaked that exponent is " << exponent_is_1 << " " << cnt-prevCntE <<  endl;
                         hits.push_back(exponent_is_1);
                         iteration_started = false;
-                        ready += 100;
+
+                        if (exponent_is_1)
+                            ready += 2343; //Wait a bit more
+
 			prevCntE=cnt;
                     }
                 }
@@ -510,7 +518,7 @@ public:
                 unsigned time_to_wait = load(multiply_addr +  LINE_SIZE*set_number_l3*spy_id, spy_id);
                 //ready += time_to_wait;
                 bool hit = false;
-                if (time_to_wait < L3_CACHE_MISS_PENALTY - CACHE_NOISE/4) hit = true;
+                if (time_to_wait < L3_CACHE_MISS_PENALTY - cache_noise/4) hit = true;
                 hits.push_back(hit); /* TODO - Update algorithm accordingly. We no longer have a <hit> or <miss> indicator */
                 cout << "SPY " << spy_id << " hit: " << hit << endl;                
                 // update wait time
@@ -538,10 +546,10 @@ VOID instr_cache_load(unsigned long ip) {
     /* TESTING function addresses    */
     if (ip == square_addr){
         start_multi = true;
-        cout << "square" << endl;
+        cout << "square " << spies[0]->cnt << endl;
     }
     else if(ip == multiply_addr){
-        cout << "multiply" << endl;
+        cout << "multiply " << spies[0]->cnt << endl;
     }
     /* ------------------------------ */
 
@@ -656,7 +664,7 @@ void print_combined_key () {
     }
     else{
         cout << "Key: ";
-        for (unsigned int i = 4; i < spies[1]->hits.size() - 2; i+= 2){
+        /*for (unsigned int i = 4; i < spies[1]->hits.size() - 2; i+= 2){
             if (spies[1]->hits[i] && !spies[1]->hits[i+1])
                 cout << "1";
             else if ((spies[1]->hits[i+1])){
@@ -667,6 +675,16 @@ void print_combined_key () {
                 cout << "0";
         }
         cout << "1" << endl;
+        */
+
+        for (unsigned int i = 0; i < spies[1]->hits.size(); i+= 1){
+            if (spies[1]->hits[i])
+                cout << "1";
+            else{
+                cout << "0";
+            }
+        }
+        cout << endl;
     }
 }
 
@@ -908,8 +926,8 @@ int main(int argc, char **argv)
     spy_probability = 100; // chances a spy will insert an instruction
     
     // select attack
-    multi_spy = true;
-    shared_l2 = false;
+    multi_spy = false;
+    shared_l2 = true;
 
     if (shared_l2){
         spy_count = 2;
@@ -929,6 +947,7 @@ int main(int argc, char **argv)
     square_addr = strtol(argv[6], NULL, 16);
     multiply_addr = strtol(argv[7], NULL, 16);
     wait_time = strtol(argv[8], NULL, 10);
+    cache_noise = strtol(argv[9], NULL, 10);
     PIN_Init(argc, argv);
     
     /* Parameters taken from a real i7 processor (3.4 GHz i7-4770). L3 cache size is made to be a power of 2 */
