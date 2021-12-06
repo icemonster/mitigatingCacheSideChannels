@@ -228,10 +228,6 @@ Pintool does not have support for inserting analysis code into multiple executab
 To get around this, we used the victim program~\footnote{RSA implementation found at \\\url{https://gist.github.com/Thelouras58/a3b04a3df0d167743084ff94442f52d8}} as the executable.
 The spies, cache hierarchy, SHARP protocol, and global timing were implemented in the pintool itself.
 
-Describe Implementation 
-
-Describe Resulsts
-
 \subsection{Multiple Spy Attack Evaluation}
 
 In the shared core attack the spy on the separate core can determine through repeated probes when the square instruction has been used by the victim, prompting the spy to check if the multiply instruction was used.
@@ -298,6 +294,56 @@ Using some other metric for comparing strings may show better results.
 These results can be duplicated using the script:
 \begin{verbatim}
 sh multi-spy-attack.sh <iterations> <square addr> <multiply addr> 
+\end{verbatim}
+
+\subsection{Shared core Spy Attack Evaluation}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[scale=0.7]{../presentation/shared_experiments.png}
+    \caption{Comparing number of correctly leaked bits of private exponent depending on the noise in cache loads.}
+    \label{fig:ssp}
+\end{figure}
+
+The spy that shares the core with the victim only has to repeatedly evict the multiply and square addresses from its L2 cache, without evicting them from the L3 cache. Thus, it does:
+\begin{enumerate} 
+    \item load (multiply address + line size $\times$ L2 set number  $\times$ i) for $i \in \{1..L2\_ASSOCIATIVITY\}$
+    \item load (square address + line size $\times$ L2 set number  $\times$ i) for $i \in \{1..L2\_ASSOCIATIVITY\}$
+\end{enumerate}
+
+Probabilistically, the loaded addresses will correspond to a completely different set in the L3.
+
+The other spy is the one that actually leaks the private key. It can be seen as a state machine. 
+In the $initial\_state$, it tries to detect whether a new iteration has started. If so, it moves to the $iteration\_found$ state and waits $t_1$ cycles. Otherwise, it waits $t_2$ cycles.
+In the $iteration\_found$ state, it checks whether the exponent bit is a 1. It waits $t_3$ cycles and moves to the $initial\_state$ regardless, but if exponent is really a 1 it ways an extra $t_4$ cycles. This is because if the exponent is a 1, the multiply will be called and therefore the number of cycles until we start the next iteration will be greater.
+
+The way we found $t_1$, $t_2$, $t_3$ and $t_4$ is similar to the multiple spy attack we described earlier. \\
+
+Even in a simulator, we had to overcome a series of technical difficulties due to the difficulty of implementing this kind of attacks. We enumerate a few of the challenges:
+\begin{enumerate}
+    \item Other instructions executed by the victim (or accessed data) can map to the same set as the multiply / square address. For example, if the square and multiply addresses are very close to eachother, they might be mixed up during iteration/exponent bit detection. To fight this, we can choose addresses from the start or end of each of the functions to maximize their distance. Thus, we might choose to not pass the exact start addresses of the square/multiply address to our pintool. We just need instructions that will be executed if and only if the target function is executed.
+    \item Depending on what is the current state, the second spy might need to wait a different number of cycles until its next action. If the exponent bit is a 1, the multiply function will be called and therefore there will be more cycles executed during that iteration. We ended up splitting that in four different times and empirically determine them.
+    \item If one or more iterations are not detected correctly (i.e. we either missed an iteration or incorrectly detected an extra iteration) the combined key will be hard to compare to the leaked key, as it will have a different number of bits. It is hard to combine the result of multiple executions if we are not sure when some iterations started. Thus, we should always prioritize the correct identification of the square address hit.
+\end{enumerate}
+
+
+Figure~\ref{fig:ssp} represents how many bits of the private exponent can we correctly identify, relatively to how much noise we have during cache loads. 
+The x-axis represents the number of cycles that a load will vary from its baseline. The L3 cache miss penalty is 120 cycles. L3 baseline hit time is 40 cycles (situation where L1 and L2 miss but it hits L3). This will have an impact on the spy hit detection, both for the iteration start detection or the exponent value for the current iteration. \\
+
+As we can see, if the overall noise is smaller than 80 cycles we can recover the private exponent, even if we need multiple executions to account for possible errors. From that point on, either the attack is not effective, or we are not comparing the resulting leaked key in the best way. Imagine that we missed the first iteration (so we have one more bit than the actual key). Then the bits of the leaked key will look incorrect, but actually they are just shifted to the right by 1 bit. We leave as future work the study of a good way to compare the results of this attacks against the real key and how to go from that to a real key recovery attack.
+
+The alarm clock for the first core is usually around ~2600 after this attack, which would be detected by SHARP. We noticed though that the alarm triggers increase linearly with the number of bits. We only need to correctly identify 75\% of the bits to successfully recover the private exponent, so we can actually stop before reaching the threshold of 2000 alarm triggers and still have a successfull attack.
+
+
+The results of executing this attack for varying amounts of noise during cache loads can be replicated by running
+\begin{verbatim}
+    python3 process-shared-spy-attack.py
+\end{verbatim}
+It assumes address for multiply is 0x4016dc and 0x4014e3 for square.
+
+Results can be processed with
+\begin{verbatim}
+    python3 process-shared-spy-attack.py
 \end{verbatim}
 
 \section{Conclusion and Future Work}
